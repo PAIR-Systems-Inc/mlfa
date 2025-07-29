@@ -1,28 +1,33 @@
 from O365 import Account, FileSystemTokenBackend
 from dotenv import load_dotenv
 import os, time
-from openai import OpenAI
+import openai
 import json
 
 load_dotenv()
 
 # ENV CONFIG
-TENANT_ID = "f3017bea-ce2e-42df-b5e1-8aa884803525"
 CLIENT_ID = "e55dc410-9822-47e9-9c31-a17a39b30ce1"
 CLIENT_SECRET = os.getenv("O365_CLIENT_SECRET")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-EMAIL_TO_WATCH = "info@mlfa.org"  # use real tenant mailbox
+EMAIL_TO_WATCH = "mariamahmadpear@outlook.com"
 
-credentials = (CLIENT_ID, CLIENT_SECRET)
-client = OpenAI(api_key=OPENAI_API_KEY)
+credentials = (CLIENT_ID, None)
+openai.api_key = OPENAI_API_KEY
 
-# AUTH
+# AUTH - using personal account flow (interactive)
 token_backend = FileSystemTokenBackend(token_path=".", token_filename="o365_token.txt")
-account = Account(credentials, tenant_id=TENANT_ID, auth_flow_type="credentials", token_backend=token_backend)
+account = Account(
+    credentials,
+    auth_flow_type="authorization",  # For personal Outlook accounts
+    token_backend=token_backend
+)
 
 if not account.is_authenticated:
-    account.authenticate()
+    # This will open a browser for OAuth login (first time)
+    account.authenticate(scopes=['basic', 'message_all'])
 
+# SELECT MAILBOX AND FOLDER
 mailbox = account.mailbox(resource=EMAIL_TO_WATCH)
 folder = mailbox.inbox_folder()
 
@@ -49,16 +54,20 @@ Subject: {subject}
 Body:
 {body}
 """
-    response = client.chat.completions.create(
-        model="gpt-4",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.2,
-    )
-    return json.loads(response.choices[0].message.content)
+    try:
+        response = openai.chat.completions.create(
+            model="gpt-4.1",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2,
+        )
+        return json.loads(response.choices[0].message.content)
+    except Exception as e:
+        print(f"⚠️ OpenAI classification error: {e}")
+        return {}
 
-# MAIN LOOP
+# MAIN EMAIL WATCH LOOP
 last_delta = None
-print(f"📬 Watching {EMAIL_TO_WATCH} … Ctrl-C to stop.")
+print(f"📬 Watching inbox for: {EMAIL_TO_WATCH} … Ctrl-C to stop.")
 
 while True:
     qs = folder.new_query().select("id", "subject", "sender", "receivedDateTime", "body")
@@ -72,9 +81,9 @@ while True:
             result = classify_email(msg.subject, msg.body)
             print(json.dumps(result, indent=2))
 
-            # (Optional) Forward email logic here...
+            # Optional: Auto-forward logic (commented out for now)
             # to_forward = msg.forward()
-            # for r in result["recommended_recipients"]:
+            # for r in result["recipients"]:
             #     to_forward.to.add(r)
             # to_forward.body = f"Auto-routed:\n\n{result['reason']}\n\nOriginal message:\n\n" + msg.body
             # to_forward.send()
@@ -82,6 +91,6 @@ while True:
         last_delta = getattr(msgs, 'delta_token', None)
 
     except Exception as e:
-        print(f"❌ Error: {e}")
+        print(f"⚠️ Email loop error: {e}")
 
     time.sleep(30)
