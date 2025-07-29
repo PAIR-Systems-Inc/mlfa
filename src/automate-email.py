@@ -86,7 +86,7 @@ def process_folder(folder, name, delta_token):
     try:
         msgs = folder.get_messages(query=qs)
         
-        # Keeps only the emails that either have been unread or a delta token was used or it was recieved after the start_time. 
+        # Keeps only the emails that either have been unread AND a delta token was used or it was recieved after the start_time. 
         filtered = [
             msg for msg in msgs
             if not msg.is_read and (delta_token or (msg.received and msg.received > START_TIME))
@@ -122,7 +122,7 @@ def process_folder(folder, name, delta_token):
                 reply_message = msg.reply(to_all=False) # if we want reply-all then it has to be True not False. 
                 reply_message.body = "Thank you for reaching out. Please go ahead and Apply for Help through our website: https://mlfa.org/application-for-legal-assistance/   -AI"
                 reply_message.send()
-            elif result.get('primary_action' == "folder_sales"): 
+            elif result.get('primary_action') == "folder_sales": 
                 target_folder = mailbox.get_folder(folder_name='Sales emails')
                 msg.move(target_folder)
 
