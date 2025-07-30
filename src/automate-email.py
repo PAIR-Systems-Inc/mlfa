@@ -25,17 +25,45 @@ mailbox = account.mailbox(resource=EMAIL_TO_WATCH)
 inbox_folder = mailbox.inbox_folder()
 junk_folder = mailbox.junk_folder()
 
-# ──────────────── DELTA TOKEN ────────────────
+
+
+
+def read_token(path):
+    if os.path.exists(path):
+        with open(path, "r") as f:
+            return f.read().strip()
+    return None
+
 def load_last_delta():
-    def read_token(path): return open(path).read().strip() if os.path.exists(path) else None
-    return read_token("delta_token_inbox.txt"), read_token("delta_token_junk.txt")
+    inbox_token = read_token("delta_token_inbox.txt")
+    junk_token = read_token("delta_token_junk.txt")
+    return inbox_token, junk_token
+
 
 def save_last_delta(inbox_token, junk_token):
     if inbox_token: open("delta_token_inbox.txt", "w").write(inbox_token)
     if junk_token: open("delta_token_junk.txt", "w").write(junk_token)
 
-# ──────────────── CLASSIFICATION ────────────────
+
 def classify_email(subject, body):
+    """
+    Passes the subject and body of the email to chat gpt, which figures out how to handle the email. 
+    Chat-GPT nicely returns the information in json format. 
+
+    Args:
+    subject (int): The ID of the user to fetch.
+    body (bool): Whether to include historical data. Defaults to False.
+
+    Returns:
+    dict: A dictionary representing the user and (optionally) their history.
+
+    Raises:
+    ValueError: If the user_id is invalid.
+    ConnectionError: If the database cannot be reached.
+    """
+
+
+
     prompt = f"""
 You are an email routing assistant for MLFA (Muslim Legal Fund of America), a nonprofit organization.
 
@@ -70,7 +98,7 @@ Body:
             temperature=0.2,
         )
         raw = response.choices[0].message.content.strip()
-        if raw.startswith("```json"): raw = raw[len("```json"):].strip()
+        if raw.startswith("```json"): raw = raw[len("```json"):].strip() #to prevent errors from occuring. 
         if raw.endswith("```"): raw = raw[:-3].strip()
         return json.loads(raw)
     except Exception as e:
@@ -106,7 +134,7 @@ def process_folder(folder, name, delta_token):
 
             processed_messages.add(msg_id)
 
-            #handling the emails appropriately .
+            #handling the emails appropriately . As of right now it's only working with my personal email... CHANGE THIS LATER. 
             if result.get('primary_action') == 'forward':
                 try:
                     recipients = ['m.ahmad0826@gmail.com']
