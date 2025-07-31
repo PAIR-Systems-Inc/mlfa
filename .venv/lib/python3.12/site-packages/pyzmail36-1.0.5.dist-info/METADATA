@@ -1,0 +1,21 @@
+Metadata-Version: 2.1
+Name: pyzmail36
+Version: 1.0.5
+Summary: Python easy mail library, to parse, compose and send emails
+Home-page: http://www.magiksys.net/pyzmail
+Author: Alain Spineux
+Author-email: alain.spineux@gmail.com
+License: LGPL
+Keywords: email
+Classifier: Intended Audience :: Developers
+Classifier: License :: OSI Approved :: GNU Library or Lesser General Public License (LGPL)
+Classifier: Operating System :: OS Independent
+Classifier: Topic :: Communications :: Email
+Classifier: Topic :: System :: Networking
+Classifier: Topic :: Internet
+Classifier: Intended Audience :: Developers
+Classifier: Programming Language :: Python
+Classifier: Programming Language :: Python :: 3
+License-File: LICENSE.txt
+
+This is a fork of pyzmail modified to be pip-installable on Python 3.6

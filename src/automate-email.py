@@ -10,6 +10,8 @@ processed_messages = set()
 
 CLIENT_ID = "b985204d-8506-4bb3-8f54-25899e38c825"
 CLIENT_SECRET = os.getenv("O365_CLIENT_SECRET")
+TENANT_ID = os.getenv("O365_TENANT_ID")
+
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 EMAIL_TO_WATCH = "mariamahmadpear@outlook.com"
 
@@ -62,35 +64,48 @@ def classify_email(subject, body):
     ConnectionError: If the database cannot be reached.
     """
 
-
-
     prompt = f"""
-You are an email routing assistant for MLFA (Muslim Legal Fund of America), a nonprofit organization.
+    You are an email routing assistant for MLFA (Muslim Legal Fund of America), a nonprofit organization.
 
-Routing Rules & Recipients:
-- Legal inquiries (asking for help) → Direct to "Apply for Help" website 
-- Donor-related inquiries (payments, receipts) → Forward to: Mujahid.rasul@mlfa.org, Syeda.sadiqa@mlfa.org
-- Sponsorship requests → Forward to: Arshia.ali.khan@mlfa.org, Maria.laura@mlfa.org  
-- Organizational questions → Forward to: Arshia.ali.khan@mlfa.org, Maria.laura@mlfa.org
-- Email marketing/sales → Move to "Sales emails" folder
+    Your job is to classify incoming emails based on their content and intent, not just keywords. Use the routing rules below to assign one or more categories to each email, along with the correct recipient(s) if applicable.
 
-IMPORTANT: 
-1. An email can have MULTIPLE categories
-2. If "legal" means someone ASKING FOR HELP → use "website_redirect" 
-3. If "legal" means someone OFFERING TO HELP (volunteer, attorney offering services) → use "forward" to organizational contacts
-4. Always include ALL recipients for forwarding categories
+    Routing Rules & Recipients:
 
-Analyze this email and return JSON with:
-- categories: array of applicable categories from ["legal", "donor", "sponsorship", "organizational", "marketing"]
-- primary_action: "forward" (if any forwarding category), "website_redirect" (if asking for legal help), or "folder_sales"
-- all_recipients: combined list of ALL email addresses from applicable forwarding categories (empty only for website_redirect or folder_sales)
-- reason: explanation of each category
+    - Legal inquiries → If someone is **asking for legal help or representation**, categorize as "legal". These users should be directed to the "Apply for Help" website.
+    - Donor-related inquiries → Only categorize as "donor" if the **sender is a donor** or is **asking about a specific donation**, such as payment issues, receipts, or donation follow-ups. Forward to: Mujahid.rasul@mlfa.org, Syeda.sadiqa@mlfa.org
+    - Sponsorship requests → If someone is **requesting sponsorship or support from MLFA**, categorize as "sponsorship". Forward to: Arshia.ali.khan@mlfa.org, Maria.laura@mlfa.org
+    - Organizational questions → If someone is **asking about MLFA’s internal operations, leadership, volunteering, or employment**, categorize as "organizational". Forward to: Arshia.ali.khan@mlfa.org, Maria.laura@mlfa.org
+    - Email marketing/sales → If the sender is **offering or promoting a product, service, or software**, categorize as "marketing" **only if the offering is clearly relevant to nonprofit operations**, such as donor management tools, volunteer coordination, legal intake software, or nonprofit fundraising platforms. These should be moved to the "Sales emails" folder.
+    - Irrelevant/spam → Categorize as "irrelevant" if the email is:
+    - A **generic B2B or commercial pitch** not tailored to nonprofit or legal aid work (e.g., SEO services, AI content tools, sales automation)
+    - An **obvious scam, AI-generated nonsense, or phishing**
+    - **Unrelated to MLFA’s mission** of legal advocacy for Muslims in the U.S.
 
-Subject: {subject}
+    IMPORTANT GUIDELINES:
 
-Body:
-{body}
-"""
+    1. Focus on the sender’s **intent and relevance to MLFA**, not just topic words.
+    2. If someone is offering legal services or partnership, categorize as **organizational**, not legal.
+    3. If someone is **selling something**, even if related to donors or legal tech, it is still "marketing" (not "donor" or "legal").
+    4. An email can belong to **multiple categories**, but only if the sender is acting in those roles (e.g., a donor or applicant).
+    5. For forwarding categories (donor, sponsorship, organizational), include all relevant recipients in `all_recipients`.
+    6. If the email is marketing-only or irrelevant, leave `all_recipients` empty.
+    7. If an email would otherwise be marketing, but is **irrelevant to nonprofit legal advocacy**, categorize it as `"irrelevant"` instead.
+
+    Return a JSON object with:
+
+    - `categories`: array of applicable categories from ["legal", "donor", "sponsorship", "organizational", "marketing", "irrelevant"]
+    - `all_recipients`: list of relevant email addresses (may be empty for legal, marketing, or irrelevant cases)
+    - `reason`: a dictionary explaining why each category was assigned
+
+    Subject: {subject}
+
+    Body:
+    {body}
+    """
+
+
+
+
     try:
         response = openai.chat.completions.create(
             model="gpt-4.1-mini",
@@ -134,39 +149,78 @@ def process_folder(folder, name, delta_token):
 
             processed_messages.add(msg_id)
 
-            #handling the emails appropriately . As of right now it's only working with my personal email... CHANGE THIS LATER. 
-            if result.get('primary_action') == 'forward':
-                try:
-                    recipients = ['m.ahmad0826@gmail.com']
-                    
-                    print(f"    Forwarding email to: {', '.join(recipients)}")
-                    forward_msg = msg.forward()
-                    forward_msg.to.add(recipients)
-                    forward_msg.send()
-                    print("   Forwarded successfully.")
-                except Exception as e:
-                    print(f"   Could not forward email: {e}")
-            elif result.get('primary_action') == "website_redirect": 
-                reply_message = msg.reply(to_all=False) # if we want reply-all then it has to be True not False. 
-                reply_message.body = "Thank you for reaching out. Please go ahead and Apply for Help through our website: https://mlfa.org/application-for-legal-assistance/   -AI"
-                reply_message.send()
-            elif result.get('primary_action') == "folder_sales": 
-                target_folder = mailbox.get_folder(folder_name='Sales emails')
-                msg.move(target_folder)
+            categories = result.get("categories", [])
+            recipients_set = set()
+
+            for category in categories:
+                if category == "legal":
+                    reply_message = msg.reply(to_all=False)
+                    reply_message.body = (
+                        "Thank you for reaching out to the Muslim Legal Fund of America.\n\n"
+                        "If you are seeking legal assistance, please submit an application through our website at:\n"
+                        "https://mlfa.org/application-for-legal-assistance/\n\n"
+                        ". We appreciate your message.\n\n"
+                    )
+
+                    reply_message.send()
+
+                elif category == "donor":
+                    recipients_set.update(["Mujahid.rasul@mlfa.org", "Syeda.sadiqa@mlfa.org"])
+
+                elif category == "sponsorship":
+                    recipients_set.update(["Arshia.ali.khan@mlfa.org", "Maria.laura@mlfa.org"])
+
+                elif category == "organizational":
+                    recipients_set.update(["Arshia.ali.khan@mlfa.org", "Maria.laura@mlfa.org"])
+
+                elif category == "marketing":
+                    inbox = mailbox.inbox_folder()
+                    sales_folder = inbox.get_folder(folder_name="Sales emails")
+                    print("Moving to sales emails folder.")
+                    msg.move(sales_folder)
+
+
+            if recipients_set:
+                forward_msg = msg.forward()
+                #forward_msg.to.add(list(recipients_set))
+                forward_msg.to.add('m.ahmad0826@gmail.com')
+                forward_msg.send()
+                
+            if "irrelevant" in categories:
+                tag_email(msg, categories)
+                continue
 
             
-            print("   Marking email as read...")
-            try:
-                msg.mark_as_read()
-                print("   Marked as read")
-            except Exception as e:
-                print(f"    Could not mark as read: {e}")
+            
+            if set(categories) != {"marketing"}:
+                tag_email(msg, categories)
+                mark_as_read(msg)
 
+            
         return getattr(msgs, 'delta_token', delta_token)
 
     except Exception as e:
         print(f" Error accessing {name}: {e}")
         return delta_token
+
+
+
+def tag_email(msg, categories): 
+    prefixed = [f'PAIRActioned/{c}' for c in categories]
+    all_tags = prefixed + ['PAIRActioned']
+    msg.categories = all_tags
+    msg.save_message()
+
+
+def mark_as_read(msg): 
+    print("   Marking email as read...")
+    try:
+        msg.mark_as_read()
+        print("   Marked as read")
+    except Exception as e:
+        print(f"    Could not mark as read: {e}")
+
+
 
 
 inbox_delta, junk_delta = load_last_delta()
@@ -177,4 +231,4 @@ while True:
     junk_delta = process_folder(junk_folder, "JUNK", junk_delta)
     #gets the new delta tokens and then saves them,
     save_last_delta(inbox_delta, junk_delta)
-    time.sleep(30)
+    time.sleep(10)
