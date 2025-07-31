@@ -76,59 +76,70 @@ def classify_email(subject, body):
     prompt = f"""
     You are an email routing assistant for MLFA (Muslim Legal Fund of America), a nonprofit organization focused on legal advocacy for Muslims in the United States.
 
-    Your job is to classify incoming emails based on their **content, intent, and relevance** to MLFA’s mission. Do not rely on keywords alone. Use the rules below to assign one or more categories and determine the correct recipients if applicable.
+    Your job is to classify incoming emails based on their **content, sender intent, and relevance** to MLFA’s mission. Do not rely on keywords alone. Use the routing rules below to assign one or more categories and determine appropriate recipients if applicable.
 
     ROUTING RULES & RECIPIENTS:
 
     - **Legal inquiries** → If someone is explicitly **asking for legal help or representation**, categorize as `"legal"`. These users should be referred to MLFA’s "Apply for Help" form (no forwarding needed).
 
-    - **Donor-related inquiries** → Categorize as `"donor"` only if the **sender is a donor** or is asking about a **specific donation**, such as issues with payment, receipts, or follow-ups. Forward to:
+    - **Donor-related inquiries** → Categorize as `"donor"` only if the **sender is a donor** or is asking about a **specific donation**, such as issues with payment, receipts, or donation follow-ups. Forward to:  
     Mujahid.rasul@mlfa.org, Syeda.sadiqa@mlfa.org
 
-    - **Sponsorship requests** → If someone is **requesting sponsorship or financial support from MLFA**, categorize as `"sponsorship"`. Forward to:
+    - **Sponsorship requests** → If someone is **requesting sponsorship or financial support from MLFA**, categorize as `"sponsorship"`. Forward to:  
     Arshia.ali.khan@mlfa.org, Maria.laura@mlfa.org
 
-    - **Organizational questions** → If the sender is asking about **MLFA’s internal operations**, such as leadership, partnerships, volunteering, employment, or outreach, categorize as `"organizational"`. Forward to:
+    - **Organizational questions** → If the sender is asking about **MLFA’s internal operations**, such as leadership, partnerships, volunteering, employment, or collaboration, categorize as `"organizational"`. Forward to:  
     Arshia.ali.khan@mlfa.org, Maria.laura@mlfa.org
 
-    - **Email marketing/sales** → If the sender is **promoting or offering a product, service, or software**, categorize as `"marketing"` only if:
-    1. The offering is clearly and specifically relevant to **MLFA’s nonprofit or legal work**, and
-    2. The sender shows contextual awareness of MLFA’s mission or prior contact,
-    3. The product is narrowly targeted (e.g., legal case management, Islamic nonprofit compliance tools, or court filing automation).
-    These messages should be placed in the "Sales emails" folder. **Do not treat generic or cold outreach as marketing.**
+    - **Email marketing/sales** → If the sender is **offering a product, service, or software**, categorize as `"marketing"` only if:
+    1. The offering is clearly and specifically relevant to MLFA’s nonprofit or legal work, **and**
+    2. The sender shows **clear contextual awareness** of MLFA’s mission or refers to a **prior conversation or relationship**, **and**
+    3. The product is **narrowly tailored** to legal nonprofits (e.g., case management, Islamic legal tools, intake systems).  
+    These emails should be moved to the "Sales emails" folder.  
+    **Do not classify generic or cold outreach as marketing.**
 
-    - **Spam** → Obvious scams, phishing attempts, AI-generated nonsense, or any fraudulent messages. These should be moved to the Junk folder.
+    - **Cold outreach** → Any **unsolicited email** offering services, partnerships, software, or promotions. This includes:
+    - Emails that show **no prior relationship** with MLFA
+    - Emails that use language like “Enroll now,” “limited time offer,” “boost donations,” “just $79/month,” or “click here”
+    - Legal-adjacent sales offers that are **clearly mass-marketed or generic**, even if they reference Muslims or legal rights  
+    These should be classified as `"cold_outreach"` and marked as read.
 
-    - **Cold outreach** → Generic, unsolicited B2B or sales emails, even if they mention fundraising, AI, or nonprofit topics. Typical signs include phrases like “limited-time offer,” “800% increase,” “click here,” or “boost donations.” These should be marked as read and ignored.
+    - **Spam** → Obvious scams, phishing attempts, AI-generated nonsense, or fraudulent messages. These should be moved to the Junk folder.
 
-    - **Newsletter** → Mass email updates, PR announcements, or content digests unrelated to specific communication with MLFA. These may be routed to a Newsletters folder if available.
+    - **Newsletter** → Mass email updates, PR announcements, blog digests, or announcements not directly related to MLFA. These may be moved to a Newsletters folder if one exists.
 
-    - **Irrelevant (other)** → Anything not aligned with MLFA’s mission and not covered by spam, cold outreach, or newsletter — such as misdirected inquiries or off-topic messages. These should be marked as read and left unforwarded.
+    - **Irrelevant (other)** → Anything that does not fall into the above categories and is unrelated to MLFA’s mission. Examples: misdirected emails, random inquiries, or vague outreach. These should be marked as read and ignored.
 
     IMPORTANT GUIDELINES:
 
-    1. Focus on the **sender’s intent and relevance to MLFA’s legal mission**, not just keywords.
-    2. If someone is **offering legal services or collaboration**, categorize as `"organizational"`, not `"legal"`.
-    3. If someone is **selling something**, even if it mentions donors or legal tech, treat it as `"marketing"` only if it is **narrowly tailored to MLFA**. Otherwise, use a subcategory of `"irrelevant"`.
-    4. **Cold emails, newsletters, SEO tools, AI apps, or sales automation platforms are not marketing** — classify them as `"cold_outreach"`, `"newsletter"`, or `"spam"` depending on content.
-    5. An email can have **multiple categories** only if the sender’s role clearly spans them (e.g., a donor requesting sponsorship).
-    6. For forwarding categories (`donor`, `sponsorship`, `organizational`), include all relevant email addresses in `all_recipients`.
-    7. For all non-forwarded categories (`legal`, `marketing`, and the irrelevant subtypes), leave `all_recipients` empty.
+    1. Focus on **intent and relationship** to MLFA, not keywords. Does this sender know who we are or are they guessing?
+    2. **Cold outreach is never marketing** — even if the email is about legal services for Muslims. If it’s unsolicited, classify it as `"cold_outreach"`.
+    3. If someone is **offering legal services**, categorize as `"organizational"` only if it appears relevant and non-salesy.
+    4. If someone is **selling something**, assign `"marketing"` **only if** it is clearly tailored to MLFA’s context **and** is not a generic offer.  
+    Otherwise, use `"cold_outreach"` or `"spam"`.
+    5. **Multiple categories should be assigned** when appropriate.  
+    For example:
+    - A donor requesting sponsorship → `"donor"` and `"sponsorship"`  
+    - A donor offering to volunteer → `"donor"` and `"organizational"`  
+    Do not default to a single label when two apply.
+    6. For categories that involve forwarding (`donor`, `sponsorship`, `organizational`), include all relevant emails in `all_recipients`.
+    7. For non-forwarded categories (`legal`, `marketing`, and the irrelevant types), leave `all_recipients` empty.
 
-    Return a JSON object with the following keys:
+    Return a JSON object with:
 
-    - `categories`: array of applicable categories from:
+    - `categories`: array of applicable categories from  
     ["legal", "donor", "sponsorship", "organizational", "marketing", "spam", "cold_outreach", "newsletter", "irrelevant_other"]
 
     - `all_recipients`: list of relevant MLFA email addresses (may be empty)
 
-    - `reason`: a dictionary explaining why each category was assigned
+    - `reason`: a dictionary that maps each category to a brief explanation of why it was applied
 
     Subject: {subject}
 
     Body:
     {body}
     """
+
 
 
     try:
@@ -207,7 +218,7 @@ def process_folder(folder, name, delta_token):
                     print("Moving to sales emails folder.")
                     msg.move(sales_folder)
                     
-            tag_email(msg, categories)
+            tag_email(msg, categories) #all emails will be tagged. 
 
             if recipients_set:
                 forward_msg = msg.forward()
@@ -215,10 +226,10 @@ def process_folder(folder, name, delta_token):
                 forward_msg.to.add('m.ahmad0826@gmail.com')
                 forward_msg.send()
             
-            if any(cat in categories for cat in SKIP_CATEGORIES):
+            if any(cat in categories for cat in SKIP_CATEGORIES): #spam emails will also not be read, and just passed over. They will be tagged. 
                 continue
 
-            if not set(categories).issubset(NONREAD_CATEGORIES):
+            if not set(categories).issubset(NONREAD_CATEGORIES): #marketing/sales emails will not be read, but moved into the appropriate folder. 
                 mark_as_read(msg)
    
         return getattr(msgs, 'delta_token', delta_token)
@@ -226,6 +237,7 @@ def process_folder(folder, name, delta_token):
     except Exception as e:
         print(f" Error accessing {name}: {e}")
         return delta_token
+    
 
 def tag_email(msg, categories):
     prefixed = []
@@ -237,7 +249,6 @@ def tag_email(msg, categories):
     all_tags = prefixed + ['PAIRActioned']
     msg.categories = all_tags
     msg.save_message()
-
 
 
 def mark_as_read(msg): 
