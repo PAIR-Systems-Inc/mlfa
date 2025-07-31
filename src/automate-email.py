@@ -5,6 +5,9 @@ import os, time, openai, json
 
 
 load_dotenv()
+
+### CONSTANTS
+
 START_TIME = datetime.now(timezone.utc)
 processed_messages = set()
 
@@ -13,15 +16,27 @@ CLIENT_SECRET = os.getenv("O365_CLIENT_SECRET")
 TENANT_ID = os.getenv("O365_TENANT_ID")
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-EMAIL_TO_WATCH = "mariamahmadpear@outlook.com"
+EMAIL_TO_WATCH = os.getenv("EMAIL_TO_WATCH")
+
+
+EMAILS_TO_FORWARD = ['Mujahid.rasul@mlfa.org', 'Syeda.sadiqa@mlfa.org', 'Arshia.ali.khan@mlfa.org', 'Maria.laura@mlfa.org', 'info@mlfa.org']
+NONREAD_CATEGORIES = {"marketing"}  # Keep these unread
+SKIP_CATEGORIES = {'spam', 'cold_outreach', 'newsletter', 'irrelevant_other'}
+
+
+###CONNECTING
+
 
 openai.api_key = OPENAI_API_KEY
-credentials = (CLIENT_ID, None)
+credentials = (CLIENT_ID, None) #delete
+#credentials = (CLIENT_ID, CLIENT_SECRET)
 token_backend = FileSystemTokenBackend(token_path=".", token_filename="o365_token.txt")
-account = Account(credentials, auth_flow_type="authorization", token_backend=token_backend)
+account = Account(credentials, auth_flow_type="authorization", token_backend=token_backend)  #Delete this
+#account = Account(credentials, auth_flow_type="credentials",  tenant_id=TENANT_ID) 
 
 if not account.is_authenticated:
-    account.authenticate(scopes=['basic', 'message_all'])
+    account.authenticate(scopes=['basic', 'message_all']) #Deleting this
+    #account.authenticate()
 
 mailbox = account.mailbox(resource=EMAIL_TO_WATCH)
 inbox_folder = mailbox.inbox_folder()
@@ -47,54 +62,66 @@ def save_last_delta(inbox_token, junk_token):
     if junk_token: open("delta_token_junk.txt", "w").write(junk_token)
 
 
+#Passes the subject and body of the email to chat gpt, which figures out how to handle the email. 
+#Chat-GPT nicely returns the information in json format. 
+
+#Args:
+#subject (str): The subject of the email. 
+#body (str): The body of the email. 
+
+#Returns:
+#A json script that includes the category of the email, who it needs to be forwarded to, and why. 
+
 def classify_email(subject, body):
-    """
-    Passes the subject and body of the email to chat gpt, which figures out how to handle the email. 
-    Chat-GPT nicely returns the information in json format. 
-
-    Args:
-    subject (int): The ID of the user to fetch.
-    body (bool): Whether to include historical data. Defaults to False.
-
-    Returns:
-    dict: A dictionary representing the user and (optionally) their history.
-
-    Raises:
-    ValueError: If the user_id is invalid.
-    ConnectionError: If the database cannot be reached.
-    """
-
     prompt = f"""
-    You are an email routing assistant for MLFA (Muslim Legal Fund of America), a nonprofit organization.
+    You are an email routing assistant for MLFA (Muslim Legal Fund of America), a nonprofit organization focused on legal advocacy for Muslims in the United States.
 
-    Your job is to classify incoming emails based on their content and intent, not just keywords. Use the routing rules below to assign one or more categories to each email, along with the correct recipient(s) if applicable.
+    Your job is to classify incoming emails based on their **content, intent, and relevance** to MLFA’s mission. Do not rely on keywords alone. Use the rules below to assign one or more categories and determine the correct recipients if applicable.
 
-    Routing Rules & Recipients:
+    ROUTING RULES & RECIPIENTS:
 
-    - Legal inquiries → If someone is **asking for legal help or representation**, categorize as "legal". These users should be directed to the "Apply for Help" website.
-    - Donor-related inquiries → Only categorize as "donor" if the **sender is a donor** or is **asking about a specific donation**, such as payment issues, receipts, or donation follow-ups. Forward to: Mujahid.rasul@mlfa.org, Syeda.sadiqa@mlfa.org
-    - Sponsorship requests → If someone is **requesting sponsorship or support from MLFA**, categorize as "sponsorship". Forward to: Arshia.ali.khan@mlfa.org, Maria.laura@mlfa.org
-    - Organizational questions → If someone is **asking about MLFA’s internal operations, leadership, volunteering, or employment**, categorize as "organizational". Forward to: Arshia.ali.khan@mlfa.org, Maria.laura@mlfa.org
-    - Email marketing/sales → If the sender is **offering or promoting a product, service, or software**, categorize as "marketing" **only if the offering is clearly relevant to nonprofit operations**, such as donor management tools, volunteer coordination, legal intake software, or nonprofit fundraising platforms. These should be moved to the "Sales emails" folder.
-    - Irrelevant/spam → Categorize as "irrelevant" if the email is:
-    - A **generic B2B or commercial pitch** not tailored to nonprofit or legal aid work (e.g., SEO services, AI content tools, sales automation)
-    - An **obvious scam, AI-generated nonsense, or phishing**
-    - **Unrelated to MLFA’s mission** of legal advocacy for Muslims in the U.S.
+    - **Legal inquiries** → If someone is explicitly **asking for legal help or representation**, categorize as `"legal"`. These users should be referred to MLFA’s "Apply for Help" form (no forwarding needed).
+
+    - **Donor-related inquiries** → Categorize as `"donor"` only if the **sender is a donor** or is asking about a **specific donation**, such as issues with payment, receipts, or follow-ups. Forward to:
+    Mujahid.rasul@mlfa.org, Syeda.sadiqa@mlfa.org
+
+    - **Sponsorship requests** → If someone is **requesting sponsorship or financial support from MLFA**, categorize as `"sponsorship"`. Forward to:
+    Arshia.ali.khan@mlfa.org, Maria.laura@mlfa.org
+
+    - **Organizational questions** → If the sender is asking about **MLFA’s internal operations**, such as leadership, partnerships, volunteering, employment, or outreach, categorize as `"organizational"`. Forward to:
+    Arshia.ali.khan@mlfa.org, Maria.laura@mlfa.org
+
+    - **Email marketing/sales** → If the sender is **promoting or offering a product, service, or software**, categorize as `"marketing"` only if:
+    1. The offering is clearly and specifically relevant to **MLFA’s nonprofit or legal work**, and
+    2. The sender shows contextual awareness of MLFA’s mission or prior contact,
+    3. The product is narrowly targeted (e.g., legal case management, Islamic nonprofit compliance tools, or court filing automation).
+    These messages should be placed in the "Sales emails" folder. **Do not treat generic or cold outreach as marketing.**
+
+    - **Spam** → Obvious scams, phishing attempts, AI-generated nonsense, or any fraudulent messages. These should be moved to the Junk folder.
+
+    - **Cold outreach** → Generic, unsolicited B2B or sales emails, even if they mention fundraising, AI, or nonprofit topics. Typical signs include phrases like “limited-time offer,” “800% increase,” “click here,” or “boost donations.” These should be marked as read and ignored.
+
+    - **Newsletter** → Mass email updates, PR announcements, or content digests unrelated to specific communication with MLFA. These may be routed to a Newsletters folder if available.
+
+    - **Irrelevant (other)** → Anything not aligned with MLFA’s mission and not covered by spam, cold outreach, or newsletter — such as misdirected inquiries or off-topic messages. These should be marked as read and left unforwarded.
 
     IMPORTANT GUIDELINES:
 
-    1. Focus on the sender’s **intent and relevance to MLFA**, not just topic words.
-    2. If someone is offering legal services or partnership, categorize as **organizational**, not legal.
-    3. If someone is **selling something**, even if related to donors or legal tech, it is still "marketing" (not "donor" or "legal").
-    4. An email can belong to **multiple categories**, but only if the sender is acting in those roles (e.g., a donor or applicant).
-    5. For forwarding categories (donor, sponsorship, organizational), include all relevant recipients in `all_recipients`.
-    6. If the email is marketing-only or irrelevant, leave `all_recipients` empty.
-    7. If an email would otherwise be marketing, but is **irrelevant to nonprofit legal advocacy**, categorize it as `"irrelevant"` instead.
+    1. Focus on the **sender’s intent and relevance to MLFA’s legal mission**, not just keywords.
+    2. If someone is **offering legal services or collaboration**, categorize as `"organizational"`, not `"legal"`.
+    3. If someone is **selling something**, even if it mentions donors or legal tech, treat it as `"marketing"` only if it is **narrowly tailored to MLFA**. Otherwise, use a subcategory of `"irrelevant"`.
+    4. **Cold emails, newsletters, SEO tools, AI apps, or sales automation platforms are not marketing** — classify them as `"cold_outreach"`, `"newsletter"`, or `"spam"` depending on content.
+    5. An email can have **multiple categories** only if the sender’s role clearly spans them (e.g., a donor requesting sponsorship).
+    6. For forwarding categories (`donor`, `sponsorship`, `organizational`), include all relevant email addresses in `all_recipients`.
+    7. For all non-forwarded categories (`legal`, `marketing`, and the irrelevant subtypes), leave `all_recipients` empty.
 
-    Return a JSON object with:
+    Return a JSON object with the following keys:
 
-    - `categories`: array of applicable categories from ["legal", "donor", "sponsorship", "organizational", "marketing", "irrelevant"]
-    - `all_recipients`: list of relevant email addresses (may be empty for legal, marketing, or irrelevant cases)
+    - `categories`: array of applicable categories from:
+    ["legal", "donor", "sponsorship", "organizational", "marketing", "spam", "cold_outreach", "newsletter", "irrelevant_other"]
+
+    - `all_recipients`: list of relevant MLFA email addresses (may be empty)
+
     - `reason`: a dictionary explaining why each category was assigned
 
     Subject: {subject}
@@ -102,8 +129,6 @@ def classify_email(subject, body):
     Body:
     {body}
     """
-
-
 
 
     try:
@@ -120,15 +145,18 @@ def classify_email(subject, body):
         print(f"Classification error: {e}")
         return {}
 
-def process_folder(folder, name, delta_token):
 
+
+
+
+
+
+def process_folder(folder, name, delta_token):
     qs = folder.new_query() 
     if delta_token: #to start from the appropriate place. 
         qs = qs.delta_token(delta_token)
-
     try:
         msgs = folder.get_messages(query=qs)
-        
         # Keeps only the emails that either have been unread AND a delta token was used or it was recieved after the start_time. 
         filtered = [
             msg for msg in msgs
@@ -165,13 +193,13 @@ def process_folder(folder, name, delta_token):
                     reply_message.send()
 
                 elif category == "donor":
-                    recipients_set.update(["Mujahid.rasul@mlfa.org", "Syeda.sadiqa@mlfa.org"])
+                    recipients_set.update([f"{EMAILS_TO_FORWARD[0]}", f"{EMAILS_TO_FORWARD[1]}"])
 
                 elif category == "sponsorship":
-                    recipients_set.update(["Arshia.ali.khan@mlfa.org", "Maria.laura@mlfa.org"])
+                    recipients_set.update([f"{EMAILS_TO_FORWARD[2]}", f"{EMAILS_TO_FORWARD[3]}"])
 
                 elif category == "organizational":
-                    recipients_set.update(["Arshia.ali.khan@mlfa.org", "Maria.laura@mlfa.org"])
+                    recipients_set.update([f"{EMAILS_TO_FORWARD[2]}", f"{EMAILS_TO_FORWARD[3]}"])
 
                 elif category == "marketing":
                     inbox = mailbox.inbox_folder()
@@ -179,38 +207,37 @@ def process_folder(folder, name, delta_token):
                     print("Moving to sales emails folder.")
                     msg.move(sales_folder)
                     
-
+            tag_email(msg, categories)
 
             if recipients_set:
                 forward_msg = msg.forward()
                 #forward_msg.to.add(list(recipients_set))
                 forward_msg.to.add('m.ahmad0826@gmail.com')
                 forward_msg.send()
-                
-            if "irrelevant" in categories:
-                tag_email(msg, categories)
+            
+            if any(cat in categories for cat in SKIP_CATEGORIES):
                 continue
 
-            
-            
-            if set(categories) != {"marketing"}:
-                tag_email(msg, categories)
+            if not set(categories).issubset(NONREAD_CATEGORIES):
                 mark_as_read(msg)
-
-            
+   
         return getattr(msgs, 'delta_token', delta_token)
 
     except Exception as e:
         print(f" Error accessing {name}: {e}")
         return delta_token
 
-
-
-def tag_email(msg, categories): 
-    prefixed = [f'PAIRActioned/{c}' for c in categories]
+def tag_email(msg, categories):
+    prefixed = []
+    for c in categories:
+        if c in ['spam', 'cold_outreach', 'newsletter']:
+            prefixed.append(f'PAIRActioned/irrelevant/{c}')
+        else:
+            prefixed.append(f'PAIRActioned/{c}')
     all_tags = prefixed + ['PAIRActioned']
     msg.categories = all_tags
     msg.save_message()
+
 
 
 def mark_as_read(msg): 
