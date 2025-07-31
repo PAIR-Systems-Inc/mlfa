@@ -178,6 +178,7 @@ def process_folder(folder, name, delta_token):
                     sales_folder = inbox.get_folder(folder_name="Sales emails")
                     print("Moving to sales emails folder.")
                     msg.move(sales_folder)
+                    
 
 
             if recipients_set:
