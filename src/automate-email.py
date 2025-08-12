@@ -1,14 +1,15 @@
 from O365 import Account, FileSystemTokenBackend
 from dotenv import load_dotenv
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import os, time, openai, json
+import textwrap
 
 
 load_dotenv()
 
 ### CONSTANTS
 
-START_TIME = datetime.now(timezone.utc)
+START_TIME = datetime.now(timezone.utc) - timedelta(weeks=2)
 processed_messages = set()
 
 CLIENT_ID = "b985204d-8506-4bb3-8f54-25899e38c825"
@@ -19,7 +20,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 EMAIL_TO_WATCH = os.getenv("EMAIL_TO_WATCH")
 
 
-EMAILS_TO_FORWARD = ['Mujahid.rasul@mlfa.org', 'Syeda.sadiqa@mlfa.org', 'Arshia.ali.khan@mlfa.org', 'Maria.laura@mlfa.org', 'info@mlfa.org']
+EMAILS_TO_FORWARD = ['Mujahid.rasul@mlfa.org', 'Syeda.sadiqa@mlfa.org', 'Arshia.ali.khan@mlfa.org', 'Maria.laura@mlfa.org', 'info@mlfa.org', 'aisha.ukiu@mlfa.org', 'shawn@strategichradvisory.com']
 NONREAD_CATEGORIES = {"marketing"}  # Keep these unread
 SKIP_CATEGORIES = {'spam', 'cold_outreach', 'newsletter', 'irrelevant_other'}
 
@@ -74,70 +75,89 @@ def save_last_delta(inbox_token, junk_token):
 
 def classify_email(subject, body):
     prompt = f"""
-    You are an email routing assistant for MLFA (Muslim Legal Fund of America), a nonprofit organization focused on legal advocacy for Muslims in the United States.
+   You are an email routing assistant for MLFA (Muslim Legal Fund of America), a nonprofit organization focused on legal advocacy for Muslims in the United States.
 
-    Your job is to classify incoming emails based on their **content, sender intent, and relevance** to MLFA’s mission. Do not rely on keywords alone. Use the routing rules below to assign one or more categories and determine appropriate recipients if applicable.
+   Your job is to classify incoming emails based on their **content, sender intent, and relevance** to MLFA’s mission. Do not rely on keywords alone. Use the routing rules below to assign one or more categories and determine appropriate recipients if applicable.
 
-    ROUTING RULES & RECIPIENTS:
+   HUMAN-STYLE REPLY ESCALATION (IMPORTANT):
+   Flag emails that should NOT get a generic auto-reply because they are personal/referral-like or contain substantial case detail. 
+   Set `needs_personal_reply=true` if ANY of these are present:
+   - **Referral signals:** mentions of being referred by a person/org (e.g., imam, attorney, community leader, “X told me to contact you,” CC’ing a referrer).
+   - **Personal narrative with specifics:** detailed timeline, names, dates, locations, docket/case numbers, court filings, detention/deportation details, attorney names, or attached evidence.
+   - **Clearly individualized appeal:** tone reads as one-to-one help-seeking rather than a form blast. 
+   If none of the above, set `needs_personal_reply=false`.
 
-    - **Legal inquiries** → If someone is explicitly **asking for legal help or representation**, categorize as `"legal"`. These users should be referred to MLFA’s "Apply for Help" form (no forwarding needed).
+   ROUTING RULES & RECIPIENTS:
 
-    - **Donor-related inquiries** → Categorize as `"donor"` only if the **sender is a donor** or is asking about a **specific donation**, such as issues with payment, receipts, or donation follow-ups. Forward to:  
-    Mujahid.rasul@mlfa.org, Syeda.sadiqa@mlfa.org
+   - **Legal inquiries** → If someone is explicitly **asking for legal help or representation**, categorize as `"legal"`. These users should be referred to MLFA’s "Apply for Help" form (no forwarding needed).
 
-    - **Sponsorship requests** → If someone is **requesting sponsorship or financial support from MLFA**, categorize as `"sponsorship"`. Forward to:  
-    Arshia.ali.khan@mlfa.org, Maria.laura@mlfa.org
+   - **Donor-related inquiries** → Categorize as `"donor"` only if the **sender is a donor** or is asking about a **specific donation**, such as issues with payment, receipts, or donation follow-ups. Forward to: 
+   Mujahid.rasul@mlfa.org, Syeda.sadiqa@mlfa.org
 
-    - **Organizational questions** → If the sender is asking about **MLFA’s internal operations**, such as leadership, partnerships, volunteering, employment, or collaboration, categorize as `"organizational"`. Forward to:  
-    Arshia.ali.khan@mlfa.org, Maria.laura@mlfa.org
+   - **Sponsorship requests** → If someone is **requesting sponsorship or financial support from MLFA**, categorize as `"sponsorship"`. Forward to: 
+   Arshia.ali.khan@mlfa.org, Maria.laura@mlfa.org
 
-    - **Email marketing/sales** → If the sender is **offering a product, service, or software**, categorize as `"marketing"` only if:
-    1. The offering is **relevant to MLFA’s nonprofit or legal work**, **and**
-    2. The sender shows **clear contextual awareness** (e.g., refers to MLFA’s legal mission, Muslim families, or nonprofit context), **and**
-    3. The product is **niche-specific**, such as legal case management, zakat compliance tools, intake systems for nonprofits, or Islamic legal software.  
-    These messages should be moved to the "Sales emails" folder.  
-    **Do not treat generic, untargeted, or mass-promotional emails as marketing.**
+   - **Fellowship inquiries** → If someone is **applying for, asking about, or offering a fellowship** (legal, advocacy, or nonprofit-focused), categorize as `"fellowship"`. Forward to:
+   aisha.ukiu@mlfa.org
 
-    - **Cold outreach** → Any **unsolicited sales email** that lacks clear tailoring to MLFA’s work. Categorize as `"cold_outreach"` if:
-    - The sender shows **no meaningful awareness** of MLFA’s mission
-    - The offer is **broad, mass-marketed, or hype-driven**
-    - The email uses commercial hooks like “Act now,” “800% increase,” “Only $99/month,” or “Click here”
-    - Even if the topic sounds legal or nonprofit-adjacent, if it **feels generic**, classify it as cold outreach  
-    These messages should be marked as read and **not treated as marketing**.
+   - **Organizational questions** → If the sender is asking about **MLFA’s internal operations**, such as leadership, partnerships, volunteering, employment, or collaboration, categorize as `"organizational"`. Forward to: 
+   Arshia.ali.khan@mlfa.org, Maria.laura@mlfa.org
 
-    - **Spam** → Obvious scams, phishing, AI-generated nonsense, or malicious intent. These should be moved to the Junk folder.
+   - **Volunteer inquiries** → If someone is **offering to volunteer** their time or skills to MLFA, categorize as `"volunteer"`. Forward to: 
+   aisha.ukiu@mlfa.org
 
-    - **Newsletter** → Bulk content like PR updates, blog digests, or mass announcements not addressed to MLFA directly. These can go in a "Newsletters" folder if available.
+   - **Job applications** → If someone is **applying for a paid job**, sending a resume, or asking about open employment positions, categorize as `"job_application"`. Forward to: 
+   shawn@strategichradvisory.com
 
-    - **Irrelevant (other)** → Anything that doesn't match the above and is unrelated to MLFA’s mission — e.g., misdirected emails, general inquiries, or off-topic messages. These should be marked as read and ignored.
+   - **Internship applications** → If someone is **applying for an internship** (paid or unpaid), sending a resume for an internship program, or inquiring about internship opportunities, categorize as `"internship"`. Forward to: 
+   aisha.ukiu@mlfa.org
 
-    IMPORTANT GUIDELINES:
+   - **Email marketing/sales** → If the sender is **offering a product, service, or software**, categorize as `"marketing"` only if:
+   1) The offering is **relevant to MLFA’s nonprofit or legal work**, **and**
+   2) The sender shows **clear contextual awareness** (e.g., refers to MLFA’s legal mission, Muslim families, or nonprofit context), **and**
+   3) The product is **niche-specific**, such as legal case management, zakat compliance tools, intake systems for nonprofits, or Islamic legal software. 
+   Move to the "Sales emails" folder. 
+   **Do not treat generic, untargeted, or mass-promotional emails as marketing.**
 
-    1. Focus on **relevance and specificity**, not just keywords. The more the sender understands MLFA, the more likely it is to be legitimate.
-    2. If an email is a **niche legal tech offer clearly crafted for MLFA or Muslim nonprofits**, treat it as `"marketing"` — even if unsolicited.
-    3. If the offer is **generic or clearly sent in bulk**, it’s `"cold_outreach"` — even if it references legal themes or Muslim communities.
-    4. Never mark cold outreach or mass sales emails as `"marketing"`, even if they reference MLFA’s field.
-    5. If someone is **offering legal services**, classify as `"organizational"` only if relevant and serious (not promotional).
-    6. Emails can and should have **multiple categories** when appropriate (e.g., a donor asking to volunteer → `"donor"` and `"organizational"`).
-    7. Use `all_recipients` only for forwarded categories: `"donor"`, `"sponsorship"`, `"organizational"`.
-    8. For `"legal"`, `"marketing"`, and all `"irrelevant"` types, leave `all_recipients` empty.
+   - **Cold outreach** → Any **unsolicited sales email** that lacks clear tailoring to MLFA’s work. Categorize as `"cold_outreach"` if:
+   - The sender shows **no meaningful awareness** of MLFA’s mission
+   - The offer is **broad, mass-marketed, or hype-driven**
+   - The email uses commercial hooks like “Act now,” “800% increase,” “Only $99/month,” or “Click here” 
+   Even if the topic sounds legal or nonprofit-adjacent, if it **feels generic**, classify it as cold outreach. 
+   Mark as read; **do not** treat as marketing.
 
-    Return a JSON object with:
+   - **Spam** → Obvious scams, phishing, AI-generated nonsense, or malicious intent. Move to Junk.
 
-    - `categories`: array of applicable categories from  
-    ["legal", "donor", "sponsorship", "organizational", "marketing", "spam", "cold_outreach", "newsletter", "irrelevant_other"]
+   - **Newsletter** → Bulk content like PR updates, blog digests, or mass announcements not addressed to MLFA directly. Place in "Newsletters" if available.
 
-    - `all_recipients`: list of relevant MLFA email addresses (may be empty)
+   - **Irrelevant (other)** → Anything that doesn't match the above and is unrelated to MLFA’s mission — e.g., misdirected emails, general inquiries, or off-topic messages. Mark as read and ignore.
 
-    - `reason`: a dictionary mapping each category to a brief explanation of why it was assigned
+   IMPORTANT GUIDELINES:
+   1. Focus on **relevance and specificity**, not just keywords. The more the sender understands MLFA, the more likely it is to be legitimate.
+   2. If an email is a **niche legal tech offer clearly crafted for MLFA or Muslim nonprofits**, treat it as `"marketing"` — even if unsolicited.
+   3. If the offer is **generic or clearly sent in bulk**, it’s `"cold_outreach"` — even if it references legal themes or Muslim communities.
+   4. Never mark cold outreach or mass sales emails as `"marketing"`, even if they reference MLFA’s field.
+   5. If someone is **offering legal services**, classify as `"organizational"` only if relevant and serious (not promotional).
+   6. Emails can and should have **multiple categories** when appropriate (e.g., a donor asking to volunteer → `"donor"` and `"volunteer"`).
+   7. Use `all_recipients` only for forwarded categories: `"donor"`, `"sponsorship"`, `"fellowship"`, `"organizational"`, `"volunteer"`, `"job_application"`, `"internship"`.
+   8. For `"legal"`, `"marketing"`, and all `"irrelevant"` types, leave `all_recipients` empty.
 
-    Subject: {subject}
+   PRIORITY & TIES:
+   - If `"legal"` applies, include it regardless of other categories.
+   - `"marketing"` vs `"cold_outreach"`: choose only one based on tailoring (see rules above).
 
-    Body:
-    {body}
-    """
+   Return a JSON object with:
+   - `categories`: array from ["legal","donor","sponsorship","fellowship","organizational","volunteer","job_application","internship","marketing","spam","cold_outreach","newsletter","irrelevant_other"]
+   - `all_recipients`: list of MLFA email addresses (may be empty)
+   - `needs_personal_reply`: boolean per the Escalation section
+   - `reason`: dictionary mapping each category to a brief justification
+   - `escalation_reason`: brief string explaining why `needs_personal_reply` is true (empty string if false)
 
+   Subject: {subject}
 
+   Body:
+   {body}
+   """
 
     try:
         response = openai.chat.completions.create(
@@ -155,21 +175,21 @@ def classify_email(subject, body):
 
 
 
-
-
-
-
 def process_folder(folder, name, delta_token):
     qs = folder.new_query() 
     if delta_token: #to start from the appropriate place. 
         qs = qs.delta_token(delta_token)
+    
     try:
         msgs = folder.get_messages(query=qs)
         # Keeps only the emails that either have been unread AND a delta token was used or it was recieved after the start_time. 
         filtered = [
             msg for msg in msgs
-            if not msg.is_read and (delta_token or (msg.received and msg.received > START_TIME))
+            if not msg.is_read 
+            and (delta_token or (msg.received and msg.received > START_TIME))
+            and not any(cat.startswith("PAIRActioned") for cat in (msg.categories or []))
         ]
+
         if not filtered:
             return getattr(msgs, 'delta_token', delta_token)
 
@@ -191,12 +211,51 @@ def process_folder(folder, name, delta_token):
             for category in categories:
                 if category == "legal":
                     reply_message = msg.reply(to_all=False)
-                    reply_message.body = (
-                        "Thank you for reaching out to the Muslim Legal Fund of America.\n\n"
-                        "If you are seeking legal assistance, please submit an application through our website at:\n"
-                        "https://mlfa.org/application-for-legal-assistance/\n\n"
-                        ". We appreciate your message.\n\n"
-                    )
+                    
+                    # Check if this email needs a personal reply based on classification
+                    needs_personal = result.get("needs_personal_reply", False)
+                    
+
+                    if needs_personal:
+                        reply_message.body = """
+                            <p>Dear Sender,</p>
+
+                            <p>Thank you for reaching out to the Muslim Legal Fund of America (MLFA). 
+                            We deeply appreciate you taking the time to contact us and share your situation.</p>
+
+                            <p>We understand that seeking legal assistance can be a challenging and emotional process, 
+                            and we want you to know that we take every inquiry seriously. Your trust in MLFA to 
+                            potentially help with your legal matter means a great deal to us.</p>
+
+                            <p>To ensure we can provide you with the most appropriate assistance and connect you with 
+                            the right resources, please submit a formal application through our website:<br>
+                            <a href="https://mlfa.org/application-for-legal-assistance/">https://mlfa.org/application-for-legal-assistance/</a></p>
+
+                            <p>Our team reviews each application carefully, and we will be in touch with you regarding 
+                            next steps. If you have any questions about the application process or need help 
+                            completing it, please don't hesitate to reach out.</p>
+
+                            <p>We appreciate your patience as we work through applications, and we look forward to 
+                            learning more about how we might be able to help.</p>
+
+                            <p>Warm regards,<br>
+                            The MLFA Team<br>
+                            Muslim Legal Fund of America</p>
+                        """
+                        reply_message.body_type = "HTML"
+                    else:
+                        reply_message.body = """
+                            <p>Thank you for reaching out to the Muslim Legal Fund of America.</p>
+
+                            <p>If you are seeking legal assistance, please submit an application through our website:<br>
+                            <a href="https://mlfa.org/application-for-legal-assistance/">https://mlfa.org/application-for-legal-assistance/</a></p>
+
+                            <p>We appreciate your message.</p>
+                        """
+                        reply_message.body_type = "HTML"
+
+
+
 
                     reply_message.send()
 
@@ -209,11 +268,25 @@ def process_folder(folder, name, delta_token):
                 elif category == "organizational":
                     recipients_set.update([f"{EMAILS_TO_FORWARD[2]}", f"{EMAILS_TO_FORWARD[3]}"])
 
+                elif category == "volunteer":
+                    recipients_set.update([f"{EMAILS_TO_FORWARD[5]}"])
+                
+                elif category == "internship":
+                    recipients_set.update([f"{EMAILS_TO_FORWARD[5]}"])
+
+                elif category == "job_application":
+                    recipients_set.update([f"{EMAILS_TO_FORWARD[6]}"])
+
+                elif category == "fellowship":
+                    recipients_set.update([f"{EMAILS_TO_FORWARD[5]}"])
+
                 elif category == "marketing":
                     inbox = mailbox.inbox_folder()
                     sales_folder = inbox.get_folder(folder_name="Sales emails")
                     print("Moving to sales emails folder.")
                     msg.move(sales_folder)
+
+
                     
             tag_email(msg, categories) #all emails will be tagged. 
 
