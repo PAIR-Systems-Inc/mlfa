@@ -6,6 +6,7 @@ import textwrap
 import re
 from bs4 import BeautifulSoup
 
+
 load_dotenv()
 
 ### CONSTANTS
@@ -79,7 +80,7 @@ def save_last_delta(inbox_token, junk_token):
 
 def classify_email(subject, body):
     prompt = f"""
-   You are an email routing assistant for MLFA (Muslim Legal Fund of America), a nonprofit organization focused on legal advocacy for Muslims in the United States.
+You are an email routing assistant for MLFA (Muslim Legal Fund of America), a nonprofit organization focused on legal advocacy for Muslims in the United States.
 
 Your job is to classify incoming emails based on their **content, sender intent, and relevance** to MLFA’s mission. Do not rely on keywords alone. Use the routing rules below to assign one or more categories and determine appropriate recipients if applicable.
 Additionally, **identify the sender’s name** when possible and include it as `name_sender` in the JSON. Prefer the “From” display name; if unavailable or generic, use a clear sign-off/signature in the body. If you cannot determine the name confidently, set `name_sender` to `"Sender"`.
@@ -90,7 +91,9 @@ Set `needs_personal_reply=true` if ANY of these are present:
 - **Referral signals:** mentions of being referred by a person/org (e.g., imam, attorney, community leader, “X told me to contact you,” CC’ing a referrer).
 - **Personal narrative with specifics:** detailed timeline, names, dates, locations, docket/case numbers, court filings, detention/deportation details, attorney names, or attached evidence.
 - **Clearly individualized appeal:** tone reads as one-to-one help-seeking rather than a form blast.
-If none of the above, set `needs_personal_reply=false`.
+- **Brevity & Generic Content safeguard:** If the email is *short, vague, and generic* (e.g., “I need legal help” or “Please assist”), and does **not** include referral language or specific personal details, then set `needs_personal_reply=false` even if it asks for help.
+
+If none of the above apply, set `needs_personal_reply=false`.
 
 ROUTING RULES & RECIPIENTS:
 
@@ -108,7 +111,7 @@ aisha.ukiu@mlfa.org
 - **Organizational questions** → If the sender is asking about **MLFA’s internal operations**, such as leadership, partnerships, volunteering, employment, or collaboration, categorize as `"organizational"`. Forward to:
 Arshia.ali.khan@mlfa.org, Maria.laura@mlfa.org
 
-- **Volunteer inquiries** → If someone is **offering to volunteer** their time or skills to MLFA, categorize as `"volunteer"`. Forward to:
+- **Volunteer inquiries** → If someone is **offering to volunteer** their time or skills to MLFA **or** is **asking about volunteering** (for themselves or on behalf of someone else), categorize as `"volunteer"`. Forward to:
 aisha.ukiu@mlfa.org
 
 - **Job applications** → If someone is **applying for a paid job**, sending a resume, or asking about open employment positions, categorize as `"job_application"`. Forward to:
@@ -118,16 +121,16 @@ shawn@strategichradvisory.com
 aisha.ukiu@mlfa.org
 
 - **Email marketing/sales** → If the sender is **offering a product, service, or software**, categorize as `"marketing"` only if:
-1) The offering is **relevant to MLFA’s nonprofit or legal work**, **and**
-2) The sender shows **clear contextual awareness** (e.g., refers to MLFA’s legal mission, Muslim families, or nonprofit context), **and**
-3) The product is **niche-specific**, such as legal case management, zakat compliance tools, intake systems for nonprofits, or Islamic legal software.
+  1) The offering is **relevant to MLFA’s nonprofit or legal work**, **and**
+  2) The sender shows **clear contextual awareness** (e.g., refers to MLFA’s legal mission, Muslim families, or nonprofit context), **and**
+  3) The product is **niche-specific**, such as legal case management, zakat compliance tools, intake systems for nonprofits, or Islamic legal software.
 Move to the "Sales emails" folder.
 **Do not treat generic, untargeted, or mass-promotional emails as marketing.**
 
 - **Cold outreach** → Any **unsolicited sales email** that lacks clear tailoring to MLFA’s work. Categorize as `"cold_outreach"` if:
-- The sender shows **no meaningful awareness** of MLFA’s mission
-- The offer is **broad, mass-marketed, or hype-driven**
-- The email uses commercial hooks like “Act now,” “800% increase,” “Only $99/month,” or “Click here”
+  - The sender shows **no meaningful awareness** of MLFA’s mission
+  - The offer is **broad, mass-marketed, or hype-driven**
+  - The email uses commercial hooks like “Act now,” “800% increase,” “Only $99/month,” or “Click here”
 Even if the topic sounds legal or nonprofit-adjacent, if it **feels generic**, classify it as cold outreach.
 Mark as read; **do not** treat as marketing.
 
@@ -148,7 +151,7 @@ IMPORTANT GUIDELINES:
 8. For `"legal"`, `"marketing"`, and all `"irrelevant"` types, leave `all_recipients` empty.
 
 PRIORITY & TIES:
-- If `"legal"` applies, include it regardless of other categories.
+- If `"legal"` applies, **still include all other relevant categories** — `"legal"` is additive, never exclusive.
 - `"marketing"` vs `"cold_outreach"`: choose only one based on tailoring (see rules above).
 
 Return a JSON object with:
@@ -163,8 +166,8 @@ Subject: {subject}
 
 Body:
 {body}
+"""
 
-   """
 
     try:
         response = openai.chat.completions.create(
@@ -181,71 +184,155 @@ Body:
         return {}
 
 
-
 def process_folder(folder, name, delta_token):
+    """
+    Delta items are treated as signals only.
+    For each changed conversation, fetch ALL unread child messages and process
+    them individually (oldest -> newest), never reprocessing the original/root.
+    Internal replies are detected and handled before classification.
+    """
+    # Build delta query (optionally select a few cheap fields to reduce "shallow" items)
     qs = folder.new_query()
     if delta_token:
         qs = qs.delta_token(delta_token)
-    
+    qs = qs.select([
+        'id', 'conversationId', 'isRead', 'receivedDateTime', 'from', 'sender', 'subject'
+    ])
+
     try:
         msgs = folder.get_messages(query=qs)
-        
+
         for msg in msgs:
-            msg_id = msg.object_id
-            if msg_id in processed_messages:
+            # For each conversation that changed, act ONLY on unread children
+            conv_id = getattr(msg, 'conversation_id', None)
+            if not conv_id:
+                # Fallback: skip if no conversation id (rare)
+                dedup_key = getattr(msg, 'internet_message_id', None) or msg.object_id
+                if dedup_key in processed_messages:
+                    continue
+                try:
+                    msg.refresh()
+                except Exception:
+                    pass
+                # If this solitary item is unread, process it as a last resort
+                if not msg.is_read:
+                    # Internal-reply detection (rare path)
+                    sender_addr = (msg.sender.address or "").lower() if msg.sender else ""
+                    sender_is_staff = sender_addr in [e.lower() for e in EMAILS_TO_FORWARD]
+                    is_automated_reply = bool(re.search(fr"{REPLY_ID_TAG}\s*([^\s<]+)", msg.body or "", flags=re.I|re.S))
+                    if sender_is_staff and is_automated_reply and not any((c or '').startswith('PAIRActioned') for c in (msg.categories or [])):
+                        handle_internal_reply(msg)
+                        processed_messages.add(dedup_key)
+                        continue
+
+                    body_to_analyze = get_clean_message_text(msg)
+                    if any((c or '').startswith('PAIRActioned') for c in (msg.categories or [])):
+                        processed_messages.add(dedup_key)
+                        continue
+
+                    print(f"\nNEW:  [{name}] {msg.received.strftime('%Y-%m-%d %H:%M')} | "
+                          f"{msg.sender.address if msg.sender else 'UNKNOWN'} | {msg.subject}")
+                    result = classify_email(msg.subject, body_to_analyze)
+                    print(json.dumps(result, indent=2))
+                    handle_new_email(msg, result)
+                    processed_messages.add(dedup_key)
+                continue  # done with this delta item
+
+            # Normal path: fetch unread messages in this conversation
+            try:
+                unread_msgs = unread_in_conversation(folder, mailbox, conv_id)
+            except Exception as e:
+                print(f"   Could not fetch unread children for {conv_id}: {e}")
                 continue
-            processed_messages.add(msg_id)
 
-            is_actioned = any(cat.startswith("PAIRActioned") for cat in (msg.categories or [])) #has it been handled already
-            sender_is_staff = msg.sender.address.lower() in [email.lower() for email in EMAILS_TO_FORWARD] #are they a possible replier
-            is_automated_reply = REPLY_ID_TAG in msg.body #is this a reply to the forwarded email
+            if not unread_msgs:
+                # No unread children → nothing to do for this conversation
+                continue
 
-            if sender_is_staff and is_automated_reply and not is_actioned:
-                handle_internal_reply(msg) #if all three are true, then it must be a reply to a forwarded email. 
-                continue 
+            # Process each unread child once, oldest -> newest
+            for child in unread_msgs:
+                dedup_key = getattr(child, 'internet_message_id', None) or child.object_id
+                if dedup_key in processed_messages:
+                    continue
 
-            if not msg.is_read and not is_actioned:
-                print(f"\nNEW:  [{name}] {msg.received.strftime('%Y-%m-%d %H:%M')} | {msg.sender.address} | {msg.subject}")
-                
-                result = classify_email(msg.subject, msg.body)
+                # Make sure we have up-to-date fields on the child
+                try:
+                    child.refresh()
+                except Exception:
+                    pass
+
+                # 1) Internal reply path (staff replies captured by your hidden REPLY_ID_TAG)
+                sender_addr = (child.sender.address or "").lower() if child.sender else ""
+                sender_is_staff = sender_addr in [e.lower() for e in EMAILS_TO_FORWARD]
+                is_automated_reply = bool(re.search(fr"{REPLY_ID_TAG}\s*([^\s<]+)", child.body or "", flags=re.I|re.S))
+                if sender_is_staff and is_automated_reply and not any(
+                    (c or '').startswith('PAIRActioned') for c in (child.categories or [])
+                ):
+                    handle_internal_reply(child)
+                    processed_messages.add(dedup_key)
+                    continue
+
+                # 2) Skip if already actioned
+                if any((c or '').startswith('PAIRActioned') for c in (child.categories or [])):
+                    processed_messages.add(dedup_key)
+                    continue
+
+                # 3) Classify using reply-only text, then handle
+                body_to_analyze = get_clean_message_text(child)
+                print(f"\nNEW:  [{name}] {child.received.strftime('%Y-%m-%d %H:%M')} | "
+                      f"{child.sender.address if child.sender else 'UNKNOWN'} | {child.subject}")
+                result = classify_email(child.subject, body_to_analyze)
                 print(json.dumps(result, indent=2))
 
-                categories = result.get("categories", [])
-                recipients_set = set(result.get("all_recipients", []))
-                name_sender = result.get("name_sender")
+                handle_new_email(child, result)
 
-                tag_email(msg, categories, replyTag=False)
-                handle_emails(categories, result, recipients_set, msg, name_sender)
+                # 4) Dedup remember
+                processed_messages.add(dedup_key)
 
-                if recipients_set:
-                    original_msg_id = msg.object_id
-                    forward_msg = msg.forward()
-
-                    forward_msg.subject = f"FW: {msg.subject}"
-
-                    # 1. Manually build the instruction block (no visual styling)
-                    instruction_html = f"""
-                        <div>
-                            <span style="display:none;">{REPLY_ID_TAG}{original_msg_id}</span>
-                        </div>
-                        """
-                    forward_msg.body =  "Please reply to all recipients in the message below, ensuring that you include info@mlfa.org. Replies sent to info@mlfa.org will be automatically delivered. "+ instruction_html
-                    forward_msg.body_type = 'HTML'
-                    
-                    # Send the email to the correct recipients
-                    forward_msg.to.add('m.ahmad0826@gmail.com') # For testing
-                    # forward_msg.to.add(list(recipients_set))
-                    forward_msg.send()
-
-                if not set(categories).issubset(NONREAD_CATEGORIES):
-                    mark_as_read(msg)
-        
+        # Return latest delta token (if present) to persist
         return getattr(msgs, 'delta_token', delta_token)
 
     except Exception as e:
         print(f" Error accessing {name}: {e}")
         return delta_token
-   
+
+
+def handle_new_email(msg, result):
+    """
+    Takes a message and its AI classification result, then acts on it.
+    It does NOT call the AI again.
+    """
+    categories = result.get("categories", [])
+    recipients_set = set(result.get("all_recipients", []))
+    name_sender = result.get("name_sender")
+    
+    # We pass the message and its categories to be tagged
+    tag_email(msg, categories, replyTag=False)
+    # We use the results to perform specific actions
+    handle_emails(categories, result, recipients_set, msg, name_sender)
+
+    if recipients_set:
+        # Create a true forward of the original message
+        fwd = msg.forward()
+        
+        # Add your recipients
+        # fwd.to.add(list(recipients_set))
+        fwd.to.add('m.ahmad0826@gmail.com')  # For testing
+        
+        # Inject hidden tracking ID into the top of the forwarded body
+        instruction_html = f"""<div style="display:none;">{REPLY_ID_TAG}{msg.object_id}</div>"""
+        
+        # Prepend to the auto-generated forward body
+        fwd.body = "Please press 'Reply All,' and reply to info@mlfa.org. You're email will automatically be sent to the correct person. " + instruction_html
+        fwd.body_type = 'HTML'
+        
+        # Send the forward
+        fwd.send()
+
+
+    if not set(categories).issubset(NONREAD_CATEGORIES):
+        mark_as_read(msg)
+
 
 def handle_emails(categories, result, recipients_set, msg, name_sender): 
     for category in categories:
@@ -265,7 +352,7 @@ def handle_emails(categories, result, recipients_set, msg, name_sender):
                     and we want you to know that we take every inquiry seriously. Your trust in MLFA to 
                     potentially help with your legal matter means a great deal to us.</p>
 
-                    <p>If you haven't already, please submit a formal application through our website:<br>
+                    <p>If you have not already done so, please submit a formal application for legal assistance through our website: <br>
                     <a href="https://mlfa.org/application-for-legal-assistance/">https://mlfa.org/application-for-legal-assistance/</a></p>
 
                     <p>Our team reviews each application carefully, and we will be in touch with you regarding 
@@ -281,13 +368,19 @@ def handle_emails(categories, result, recipients_set, msg, name_sender):
                 """
                 reply_message.body_type = "HTML"
             else:
-                reply_message.body = """
-                    <p>Thank you for reaching out to the Muslim Legal Fund of America.</p>
+                reply_message.body = f"""
+                    <p>Dear {name_sender},</p>
 
-                    <p>If you are seeking legal assistance, please submit an application through our website:<br>
-                    <a href="https://mlfa.org/application-for-legal-assistance/">https://mlfa.org/application-for-legal-assistance/</a></p>
+                    <p>Thank you for contacting the Muslim Legal Fund of America (MLFA).</p>
 
-                    <p>We appreciate your message.</p>
+                   <p> If you have not already done so, please submit a formal application for legal assistance through our website:  
+                    https://mlfa.org/application-for-legal-assistance/</p>
+
+                    <p>This ensures our legal team has the information needed to review your case promptly.</p>
+
+                    <p>Sincerely, <br> 
+                    The MLFA Team</p>
+
                 """
                 reply_message.body_type = "HTML"
             reply_message.send()
@@ -373,7 +466,6 @@ def handle_internal_reply(msg):
         print(f"   ERROR: Could not send final reply. Error: {e}")
         return
 
-    # 5. Tag both emails to prevent loops
     replier_email = msg.sender.address
     tag_email(original_msg, [replier_email], replyTag=True)
     msg.mark_as_read()
@@ -381,6 +473,115 @@ def handle_internal_reply(msg):
     print("   Cleanup complete. Reply process finished.")
 
 
+def newest_unread_in_conversation(folder, mailbox, conversation_id):
+    """
+    Return the newest unread message in the given conversation (or None).
+    Uses server-side filter/order and limits to 1 item.
+    """
+    if not conversation_id:
+        return None
+
+    # Build the query FIRST
+    q = (mailbox.new_query()
+         .on_attribute('conversationId').equals(conversation_id)
+         .chain('and').on_attribute('isRead').equals(False)
+         .order_by('receivedDateTime', ascending=False)  # newest first
+         .select([
+             # Use Graph field names in $select (camelCase)
+             'id', 'conversationId', 'internetMessageId',
+             'isRead', 'receivedDateTime',
+             'from', 'sender', 'subject',
+             'categories', 'uniqueBody', 'body'
+         ]))
+
+    # Then execute with a limit of 1 (SDK-compatible way to "top(1)")
+    items = list(folder.get_messages(query=q, limit=1, order_by='receivedDateTime desc'))
+    if not items:
+        return None
+
+    msg = items[0]
+
+    # Hydrate to ensure properties like categories/unique_body are fresh
+    try:
+        # If you prefer a full re-fetch by id instead of refresh():
+        # msg = folder.get_message(object_id=msg.object_id) or msg
+        msg.refresh()
+    except Exception:
+        pass
+
+    return msg
+
+
+def unread_in_conversation(folder, mailbox, conversation_id, page_limit=30):
+    if not conversation_id:
+        return []
+
+    q = (mailbox.new_query()
+         .on_attribute('conversationId').equals(conversation_id)
+         .select([
+             'id','conversationId','internetMessageId',
+             'isRead','receivedDateTime',
+             'from','sender','subject',
+             'categories','uniqueBody','body'
+         ]))
+
+    items = list(folder.get_messages(query=q, limit=page_limit))
+    unread = [m for m in items if not getattr(m, 'is_read', False)]
+    unread.sort(key=lambda m: m.received or m.created)  # oldest→newest unread
+    for m in unread:
+        try: m.refresh()
+        except: pass
+    return unread
+
+def get_clean_message_text(msg):
+    """
+    Return only the reply content for this message.
+    Prefer Graph's unique_body (just the new text),
+    otherwise strip quoted history from the full body.
+    """
+    QUOTE_SEPARATORS = [
+        r'^\s*On .* wrote:\s*$',              
+        r'^\s*From:\s.*$',                    
+        r'^\s*-----Original Message-----\s*$',
+        r'^\s*De:\s.*$',                      
+        r'^\s*Sent:\s.*$',
+        r'^\s*To:\s.*$',
+    ]
+
+    def strip_quoted_reply(html_or_text: str) -> str:
+        if not html_or_text:
+            return ""
+        text = html_or_text
+        try:
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(html_or_text, 'html.parser')
+            for sel in [
+                'blockquote',
+                'div.gmail_quote',
+                'div[type=cite]',
+                'div.moz-cite-prefix',
+                'div.OutlookMessageHeader',
+            ]:
+                for node in soup.select(sel):
+                    node.decompose()
+            text = soup.get_text("\n")
+        except Exception:
+            pass
+
+        import re
+        lines = [ln.rstrip() for ln in text.splitlines()]
+        out = []
+        for ln in lines:
+            if ln.strip().startswith('>'):
+                break
+            if any(re.match(pat, ln, flags=re.IGNORECASE) for pat in QUOTE_SEPARATORS):
+                break
+            out.append(ln)
+
+        return "\n".join(out).strip()[:8000]
+
+    body = getattr(msg, 'unique_body', None) or getattr(msg, 'body', None) or ""
+    return strip_quoted_reply(body)
 
 
 inbox_delta, junk_delta = load_last_delta()
