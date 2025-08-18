@@ -5,6 +5,9 @@ import os, time, openai, json
 import textwrap
 import re
 from bs4 import BeautifulSoup
+from flask import Flask, jsonify, send_from_directory, request
+from flask_cors import CORS
+import threading
 
 
 load_dotenv()
@@ -26,6 +29,22 @@ EMAIL_TO_WATCH = os.getenv("EMAIL_TO_WATCH")
 EMAILS_TO_FORWARD = ['Mujahid.rasul@mlfa.org', 'Syeda.sadiqa@mlfa.org', 'Arshia.ali.khan@mlfa.org', 'Maria.laura@mlfa.org', 'info@mlfa.org', 'aisha.ukiu@mlfa.org', 'shawn@strategichradvisory.com', 'm.ahmad0826@gmail.com']
 NONREAD_CATEGORIES = {"marketing"}  # Keep these unread
 SKIP_CATEGORIES = {'spam', 'cold_outreach', 'newsletter', 'irrelevant_other'}
+
+HUMAN_CHECK = True  # Enable human check for approval hub
+
+# Simple storage for current email data
+current_email_data = {
+    "subject": "",
+    "body": "",
+    "classification": {},
+    "sender": "",
+    "received": "",
+    "message_obj": None  # Store the actual message object for processing
+}
+
+# Flask app for approval hub
+app = Flask(__name__, static_folder='.')
+CORS(app)
 
 
 
@@ -233,9 +252,21 @@ def process_folder(folder, name, delta_token):
                     print(f"\nNEW:  [{name}] {msg.received.strftime('%Y-%m-%d %H:%M')} | "
                           f"{msg.sender.address if msg.sender else 'UNKNOWN'} | {msg.subject}")
                     result = classify_email(msg.subject, body_to_analyze)
-                    print(json.dumps(result, indent=2))
-                    handle_new_email(msg, result)
-                    processed_messages.add(dedup_key)
+                    if HUMAN_CHECK: 
+                        print(json.dumps(result, indent=2))
+                        # Store current email data
+                        current_email_data["subject"] = msg.subject
+                        current_email_data["body"] = body_to_analyze
+                        current_email_data["classification"] = result
+                        current_email_data["sender"] = msg.sender.address
+                        current_email_data["received"] = msg.received.strftime('%Y-%m-%d %H:%M')
+                        current_email_data["message_obj"] = msg
+                        print(f"📧 Email stored for approval: {msg.subject}")
+                        processed_messages.add(dedup_key)
+                    else: 
+                        print(json.dumps(result, indent=2))
+                        handle_new_email(msg, result)
+                        processed_messages.add(dedup_key)
                 continue  # done with this delta item
 
             # Normal path: fetch unread messages in this conversation
@@ -283,8 +314,18 @@ def process_folder(folder, name, delta_token):
                       f"{child.sender.address if child.sender else 'UNKNOWN'} | {child.subject}")
                 result = classify_email(child.subject, body_to_analyze)
                 print(json.dumps(result, indent=2))
-
-                handle_new_email(child, result)
+                
+                if HUMAN_CHECK:
+                    # Store current email data
+                    current_email_data["subject"] = child.subject
+                    current_email_data["body"] = body_to_analyze
+                    current_email_data["classification"] = result
+                    current_email_data["sender"] = child.sender.address
+                    current_email_data["received"] = child.received.strftime('%Y-%m-%d %H:%M')
+                    current_email_data["message_obj"] = child
+                    print(f"📧 Email stored for approval: {child.subject}")
+                else:
+                    handle_new_email(child, result)
 
                 # 4) Dedup remember
                 processed_messages.add(dedup_key)
@@ -312,14 +353,10 @@ def handle_new_email(msg, result):
     handle_emails(categories, result, recipients_set, msg, name_sender)
 
     if recipients_set:
-        # Create a true forward of the original message
         fwd = msg.forward()
-        
-        # Add your recipients
         # fwd.to.add(list(recipients_set))
         fwd.to.add('m.ahmad0826@gmail.com')  # For testing
-        
-        # Inject hidden tracking ID into the top of the forwarded body
+        # Add th=e hidden tracking ID into the top of the forwarded body
         instruction_html = f"""<div style="display:none;">{REPLY_ID_TAG}{msg.object_id}</div>"""
         
         # Prepend to the auto-generated forward body
@@ -413,17 +450,34 @@ def handle_emails(categories, result, recipients_set, msg, name_sender):
             msg.move(sales_folder)
 
 def tag_email(msg, categories, replyTag):
-    prefixed = []
-    for c in categories:
-        if c in ['spam', 'cold_outreach', 'newsletter']:
-            prefixed.append(f'PAIRActioned/irrelevant/{c}')
-        elif replyTag == True: 
-            prefixed.append(f'PAIRActioned/replied/{c}')
+    # 1) Load existing categories safely
+    existing = set((msg.categories or []))
+
+    # 2) Build new tags for this operation
+    new_tags = set()
+    for c in categories or []:
+        c = (c or "").strip()
+        if not c:
+            continue
+        if replyTag:
+            new_tags.add(f"PAIRActioned/replied/{c}")
         else:
-            prefixed.append(f'PAIRActioned/{c}')
-    all_tags = prefixed + ['PAIRActioned']
-    msg.categories = all_tags
-    msg.save_message()
+            if c in ('spam', 'cold_outreach', 'newsletter'):
+                new_tags.add(f"PAIRActioned/irrelevant/{c}")
+            else:
+                new_tags.add(f"PAIRActioned/{c}")
+
+    # Always keep the umbrella marker
+    new_tags.add("PAIRActioned")
+
+    # 3) Merge (union) — do NOT drop existing tags
+    merged = existing.union(new_tags)
+
+    # 4) Save only if there’s a change
+    if merged != existing:
+        msg.categories = sorted(merged)
+        msg.save_message()
+
 
 def mark_as_read(msg): 
     print("   Marking email as read...")
@@ -466,10 +520,7 @@ def handle_internal_reply(msg):
         print(f"   ERROR: Could not send final reply. Error: {e}")
         return
 
-    replier_email = msg.sender.address
-    tag_email(original_msg, [replier_email], replyTag=True)
     msg.mark_as_read()
-    tag_email(msg, [replier_email], replyTag=True)
     print("   Cleanup complete. Reply process finished.")
 
 
@@ -584,8 +635,134 @@ def get_clean_message_text(msg):
     return strip_quoted_reply(body)
 
 
+
+# Flask routes for approval hub
+@app.route('/')
+def index():
+    return send_from_directory('.', 'approval-hub.html')
+
+@app.route('/api/emails')
+def get_emails():
+    if current_email_data["subject"]:
+        # Format data for the interface
+        categories = current_email_data["classification"].get('categories', [])
+        category_display = ', '.join([cat.replace('_', ' ').title() for cat in categories])
+        
+        recipients = current_email_data["classification"].get('all_recipients', [])
+        recipients_display = ', '.join(recipients) if recipients else 'None'
+        
+        reasons = current_email_data["classification"].get('reason', {})
+        reason_display = '; '.join(reasons.values()) if reasons else 'No reason provided'
+        
+        email = {
+            "id": "current",
+            "meta": f"FROM: [INBOX] {current_email_data['received']} | {current_email_data['sender']} | {current_email_data['subject']}",
+            "senderName": current_email_data["classification"].get('name_sender', 'Unknown'),
+            "category": category_display,
+            "recipients": recipients_display,
+            "needsReply": "Yes" if current_email_data["classification"].get('needs_personal_reply', False) else "No",
+            "reason": reason_display,
+            "escalation": current_email_data["classification"].get('escalation_reason') or 'None',
+            "originalContent": current_email_data["body"],
+            "status": "pending"
+        }
+        return jsonify([email])
+    else:
+        return jsonify([])
+
+@app.route('/api/emails/<email_id>/approve', methods=['POST'])
+def approve_email(email_id):
+    if current_email_data["subject"] and current_email_data["message_obj"]:
+        msg = current_email_data["message_obj"]
+        classification = current_email_data["classification"]
+        
+        print(f"✅ Email approved: {current_email_data['subject']} - Processing normally")
+        
+        # Process the email normally using the stored message and classification
+        handle_new_email(msg, classification)
+        
+    # Clear the current email
+    current_email_data.clear()
+    current_email_data.update({"subject": "", "body": "", "classification": {}, "sender": "", "received": "", "message_obj": None})
+    return jsonify({"status": "success", "message": "Email approved and will be processed normally"})
+
+@app.route('/api/emails/<email_id>/reject', methods=['POST'])
+def reject_email(email_id):
+    data = request.get_json()
+    reason = data.get('reason', 'No reason provided')
+    
+    if current_email_data["subject"] and current_email_data["message_obj"]:
+        msg = current_email_data["message_obj"]
+        print(f"❌ Email rejected: {current_email_data['subject']} - Reason: {reason}")
+        
+        # Move rejected email to special folder
+        try:
+            inbox = mailbox.inbox_folder()
+            rejected_folder = None
+            
+            # Try to find existing "declined" folder
+            try:
+                rejected_folder = inbox.get_folder(folder_name="declined")
+                print(f"📁 Found existing 'declined' folder")
+            except:
+                try:
+                    rejected_folder = inbox.get_folder(folder_name="Declined")
+                    print(f"📁 Found existing 'Declined' folder")
+                except:
+                    print(f"⚠️ Could not find 'declined' or 'Declined' folder")
+            
+            # Move the email to rejected folder
+            if rejected_folder:
+                try:
+                    msg.move(rejected_folder)
+                    print(f"📁 Moved email to 'declined' folder")
+                except Exception as e:
+                    print(f"⚠️ Could not move email to rejected folder: {e}")
+            
+            # Just mark as processed without adding new tags
+            try:
+                existing_cats = set(msg.categories or [])
+                existing_cats.add("PAIRActioned")  # Only add the standard processed marker
+                msg.categories = sorted(existing_cats)
+                msg.save_message()
+                print(f"📋 Marked email as processed (rejected)")
+            except Exception as e:
+                print(f"⚠️ Could not update email categories: {e}")
+            
+            # Mark as read and add to processed messages to prevent reprocessing
+            try:
+                mark_as_read(msg)
+                dedup_key = getattr(msg, 'internet_message_id', None) or msg.object_id
+                processed_messages.add(dedup_key)
+                print(f"✅ Marked email as processed")
+            except Exception as e:
+                print(f"⚠️ Could not mark as processed: {e}")
+            
+        except Exception as e:
+            print(f"❌ Error handling rejected email: {e}")
+    
+    # Clear the current email
+    current_email_data.clear()
+    current_email_data.update({"subject": "", "body": "", "classification": {}, "sender": "", "received": "", "message_obj": None})
+    return jsonify({"status": "success", "message": f"Email rejected: {reason}"})
+
+
+def start_web_server():
+    """Start the Flask web server in a separate thread"""
+    def run_server():
+        print("🌐 Starting approval hub at http://localhost:5000")
+        app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False)
+    
+    server_thread = threading.Thread(target=run_server, daemon=True)
+    server_thread.start()
+
+
+# Start the web server
+start_web_server()
+
 inbox_delta, junk_delta = load_last_delta()
 print(f"Monitoring inbox + junk for: {EMAIL_TO_WATCH} … Ctrl-C to stop.")
+print(f"📧 Approval hub available at: http://localhost:5000")
 
 while True:
     inbox_delta = process_folder(inbox_folder, "INBOX", inbox_delta)
