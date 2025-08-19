@@ -1,0 +1,8 @@
+Flask==3.0.0
+Flask-CORS==4.0.0
+Flask-HTTPAuth==4.8.0
+O365==2.0.34
+python-dotenv==1.0.0
+openai==1.51.0
+beautifulsoup4==4.12.2
+requests==2.31.0

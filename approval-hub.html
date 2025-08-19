@@ -1,0 +1,764 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Approval Hub for info@mlfa.org</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600&family=Inter:wght@300;400;500;600&display=swap');
+        
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: #0d1117;
+            color: #f0f6fc;
+            min-height: 100vh;
+            padding: 0;
+            margin: 0;
+            font-weight: 400;
+            font-size: 14px;
+            line-height: 1.5;
+        }
+
+        .header {
+            padding: 24px 20px;
+            background: #161b22;
+            border-bottom: 1px solid #30363d;
+            text-align: center;
+            margin-bottom: 24px;
+            position: relative;
+        }
+
+        .header h1 {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 18px;
+            font-weight: 500;
+            color: #58a6ff;
+            margin: 0;
+            letter-spacing: -0.025em;
+        }
+
+        .container {
+            max-width: 1600px;
+            margin: 0 auto;
+            display: flex;
+            gap: 16px;
+            padding: 0 20px 20px 20px;
+            height: calc(100vh - 100px);
+        }
+
+        @media (max-width: 1200px) {
+            .container {
+                flex-direction: column;
+                height: auto;
+                gap: 16px;
+            }
+        }
+
+        @media (max-width: 768px) {
+            .container {
+                padding: 0 12px 12px 12px;
+                gap: 12px;
+            }
+            .header {
+                padding: 16px 12px;
+                margin-bottom: 16px;
+            }
+        }
+
+        .email-list {
+            flex: 0 0 280px;
+            background: #161b22;
+            border-radius: 6px;
+            padding: 16px;
+            border: 1px solid #30363d;
+            height: 100%;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+        }
+
+        @media (max-width: 1200px) {
+            .email-list {
+                flex: none;
+                height: 200px;
+                min-height: 200px;
+            }
+        }
+
+        .email-list h2 {
+            margin-bottom: 16px;
+            color: #f0f6fc;
+            font-size: 14px;
+            font-weight: 600;
+            font-family: 'Inter', sans-serif;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            opacity: 0.8;
+        }
+
+        .email-item {
+            padding: 12px;
+            margin-bottom: 6px;
+            background: #21262d;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: all 0.15s ease;
+            border: 1px solid #30363d;
+            font-size: 13px;
+            font-family: 'JetBrains Mono', monospace;
+            font-weight: 400;
+            color: #e6edf3;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .email-item:hover {
+            background: #30363d;
+            border-color: #58a6ff;
+        }
+
+        .email-item.selected {
+            background: #1c2128;
+            border-color: #58a6ff;
+            color: #58a6ff;
+        }
+
+        .email-preview {
+            flex: 1;
+            background: #161b22;
+            border-radius: 6px;
+            padding: 20px;
+            border: 1px solid #30363d;
+            height: 100%;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .email-original {
+            flex: 1;
+            background: #161b22;
+            border-radius: 6px;
+            padding: 20px;
+            border: 1px solid #30363d;
+            height: 100%;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+        }
+
+        @media (max-width: 1200px) {
+            .email-preview, .email-original {
+                flex: none;
+                min-height: 300px;
+            }
+        }
+        
+        .email-preview h3, .email-original h3 {
+            margin: 0 0 16px 0;
+            color: #f0f6fc;
+            font-size: 14px;
+            font-weight: 600;
+            font-family: 'Inter', sans-serif;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            border-bottom: 1px solid #30363d;
+            padding-bottom: 12px;
+            opacity: 0.8;
+        }
+        
+        .original-content {
+            background: #0d1117;
+            padding: 16px;
+            border-radius: 4px;
+            border: 1px solid #30363d;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 13px;
+            line-height: 1.6;
+            color: #e6edf3;
+            white-space: pre-wrap;
+            flex: 1;
+            overflow-y: auto;
+        }
+
+        .email-header {
+            margin-bottom: 16px;
+            padding-bottom: 12px;
+            border-bottom: 1px solid #30363d;
+        }
+
+        .email-meta {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 12px;
+            font-weight: 400;
+            color: #7d8590;
+            margin-bottom: 16px;
+            padding: 8px 0;
+            border-bottom: 1px solid #30363d;
+        }
+
+        .email-content {
+            background: transparent;
+            padding: 0;
+            border: none;
+            margin-bottom: 20px;
+        }
+        
+        .email-details-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-bottom: 20px;
+            flex: 1;
+        }
+        
+        .email-details-table td {
+            padding: 12px 0;
+            border-bottom: 1px solid #30363d;
+            vertical-align: top;
+        }
+        
+        .email-details-table td.label {
+            font-family: 'Inter', sans-serif;
+            font-weight: 500;
+            color: #7d8590;
+            width: 180px;
+            background: transparent;
+            text-align: left;
+            font-size: 13px;
+        }
+        
+        .email-details-table td.value {
+            font-family: 'JetBrains Mono', monospace;
+            font-weight: 400;
+            color: #f0f6fc;
+            background: transparent;
+            text-align: left;
+            word-wrap: break-word;
+            max-width: 350px;
+            font-size: 13px;
+        }
+
+        @media (max-width: 768px) {
+            .email-details-table td.label {
+                width: 120px;
+                font-size: 12px;
+            }
+            .email-details-table td.value {
+                font-size: 12px;
+                max-width: 250px;
+            }
+        }
+        
+        .email-details-table tr:last-child td {
+            border-bottom: none;
+        }
+        
+        .status-info {
+            padding: 12px;
+            background: #0d2818;
+            border: 1px solid #238636;
+            border-radius: 4px;
+            color: #2ea043;
+            margin-top: auto;
+        }
+        
+        .status-info p {
+            margin: 0;
+            font-size: 12px;
+            font-family: 'Inter', sans-serif;
+            font-weight: 400;
+        }
+
+        .action-buttons {
+            display: flex;
+            gap: 12px;
+            justify-content: flex-start;
+            margin-top: auto;
+            padding-top: 16px;
+        }
+
+        .btn {
+            padding: 8px 16px;
+            border: 1px solid;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: 500;
+            font-size: 13px;
+            font-family: 'Inter', sans-serif;
+            transition: all 0.15s ease;
+            text-transform: none;
+            letter-spacing: 0;
+            min-width: 70px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        @media (max-width: 768px) {
+            .action-buttons {
+                gap: 8px;
+                flex-wrap: wrap;
+            }
+            .btn {
+                padding: 6px 12px;
+                font-size: 12px;
+                min-width: 60px;
+            }
+        }
+
+        .btn-reject {
+            background: #da3633;
+            color: #f0f6fc;
+            border-color: #da3633;
+        }
+
+        .btn-reject:hover {
+            background: #b62324;
+            border-color: #b62324;
+        }
+
+        .btn-accept {
+            background: #238636;
+            color: #f0f6fc;
+            border-color: #238636;
+        }
+
+        .btn-accept:hover {
+            background: #2ea043;
+            border-color: #2ea043;
+        }
+
+        .json-key {
+            color: #79c0ff;
+        }
+
+        .json-string {
+            color: #a5d6ff;
+        }
+
+        .json-number {
+            color: #79c0ff;
+        }
+
+        .json-boolean {
+            color: #ff7b72;
+        }
+
+        .loading-spinner {
+            display: none;
+            width: 16px;
+            height: 16px;
+            border: 2px solid #ccc;
+            border-top: 2px solid #fff;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-left: 8px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .notification {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            padding: 15px 20px;
+            border-radius: 8px;
+            color: white;
+            font-weight: 500;
+            transform: translateX(400px);
+            transition: transform 0.3s ease;
+            z-index: 1000;
+        }
+
+        .notification.show {
+            transform: translateX(0);
+        }
+
+        .notification.success {
+            background: #28a745;
+        }
+
+        .notification.error {
+            background: #dc3545;
+        }
+        
+        .reject-reason {
+            margin-top: 16px;
+            padding: 16px;
+            background: #161b22;
+            border-radius: 4px;
+            border: 1px solid #30363d;
+        }
+        
+        .reject-reason label {
+            display: block;
+            margin-bottom: 8px;
+            color: #e6edf3;
+            font-weight: 500;
+            font-family: 'Inter', sans-serif;
+            font-size: 13px;
+        }
+        
+        .reject-reason textarea {
+            width: 100%;
+            min-height: 80px;
+            padding: 12px;
+            background: #0d1117;
+            border: 1px solid #30363d;
+            border-radius: 4px;
+            color: #e6edf3;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 13px;
+            resize: vertical;
+            margin-bottom: 12px;
+        }
+        
+        .reject-reason textarea::placeholder {
+            color: #7d8590;
+        }
+        
+        .reject-reason textarea:focus {
+            outline: none;
+            border-color: #58a6ff;
+        }
+        
+        .reject-actions {
+            display: flex;
+            gap: 10px;
+            justify-content: flex-end;
+        }
+        
+        .btn-cancel {
+            background: #21262d;
+            color: #f0f6fc;
+            border-color: #30363d;
+        }
+        
+        .btn-cancel:hover {
+            background: #30363d;
+            border-color: #8b949e;
+        }
+        
+        .btn-confirm-reject {
+            background: #da3633;
+            color: #f0f6fc;
+            border-color: #da3633;
+        }
+        
+        .btn-confirm-reject:hover {
+            background: #b62324;
+            border-color: #b62324;
+        }
+        
+        .btn-logout {
+            position: absolute;
+            top: 50%;
+            right: 20px;
+            transform: translateY(-50%);
+            padding: 6px 12px;
+            background: #21262d;
+            color: #f0f6fc;
+            border: 1px solid #30363d;
+            border-radius: 4px;
+            cursor: pointer;
+            font-family: 'Inter', sans-serif;
+            font-size: 12px;
+            font-weight: 500;
+            transition: all 0.15s ease;
+        }
+        
+        .btn-logout:hover {
+            background: #30363d;
+            border-color: #8b949e;
+        }
+        
+        @media (max-width: 768px) {
+            .btn-logout {
+                position: static;
+                transform: none;
+                margin-top: 12px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>Approval Hub for info@mlfa.org</h1>
+        <button class="btn-logout" onclick="logout()">Logout</button>
+    </div>
+
+    <div class="container">
+        <div class="email-list">
+            <h2>Inbox</h2>
+        </div>
+
+        <div class="email-preview">
+            <h3>AI Analysis</h3>
+            <div class="email-header">
+                <div class="email-meta" id="emailMeta"></div>
+            </div>
+            
+            <div class="email-content" id="emailContent">
+                <table class="email-details-table">
+                    <tr>
+                        <td class="label">Sender Name:</td>
+                        <td class="value" id="senderName"></td>
+                    </tr>
+                    <tr>
+                        <td class="label">Category:</td>
+                        <td class="value" id="category"></td>
+                    </tr>
+                    <tr>
+                        <td class="label">Recipients:</td>
+                        <td class="value" id="recipients"></td>
+                    </tr>
+                    <tr>
+                        <td class="label">Needs Personal Reply:</td>
+                        <td class="value" id="needsReply"></td>
+                    </tr>
+                    <tr>
+                        <td class="label">Reason:</td>
+                        <td class="value" id="reason"></td>
+                    </tr>
+                    <tr>
+                        <td class="label">Escalation Required:</td>
+                        <td class="value" id="escalation"></td>
+                    </tr>
+                </table>
+                
+                <div class="status-info" style="display: none;">
+                    <p><strong>Status:</strong> Email has been processed and marked as read</p>
+                </div>
+            </div>
+
+            <div class="action-buttons">
+                <button class="btn btn-reject" onclick="handleAction('reject')">
+                    Reject
+                    <div class="loading-spinner" id="rejectSpinner"></div>
+                </button>
+                <button class="btn btn-accept" onclick="handleAction('accept')">
+                    Accept
+                    <div class="loading-spinner" id="acceptSpinner"></div>
+                </button>
+            </div>
+            
+        </div>
+        
+        <div class="email-original">
+            <h3>Original Email</h3>
+            <div class="original-content" id="originalContent"></div>
+        </div>
+    </div>
+
+    <div class="notification" id="notification"></div>
+
+    <script>
+        const emailData = [];
+
+        function selectEmail(index) {
+            // Remove selected class from all items
+            document.querySelectorAll('.email-item').forEach(item => {
+                item.classList.remove('selected');
+            });
+            
+            // Add selected class to clicked item
+            document.querySelectorAll('.email-item')[index].classList.add('selected');
+            
+            // Update email content
+            if (emailData[index]) {
+                const data = emailData[index];
+                document.querySelector('.email-meta').textContent = data.meta;
+                document.getElementById('senderName').textContent = data.senderName;
+                document.getElementById('category').textContent = data.category;
+                document.getElementById('recipients').textContent = data.recipients;
+                document.getElementById('needsReply').textContent = data.needsReply;
+                document.getElementById('reason').textContent = data.reason;
+                document.getElementById('escalation').textContent = data.escalation;
+                document.getElementById('originalContent').textContent = data.originalContent;
+                
+                // Show status info when email is selected
+                const statusInfo = document.getElementById('statusInfo');
+                if (statusInfo) {
+                    statusInfo.style.display = 'block';
+                }
+            }
+        }
+
+
+        async function handleAction(action) {
+            
+            // Get current selected email
+            const selectedIndex = document.querySelector('.email-item.selected');
+            if (!selectedIndex) {
+                showNotification('No email selected', 'error');
+                return;
+            }
+            
+            const emailIndex = Array.from(document.querySelectorAll('.email-item')).indexOf(selectedIndex);
+            const currentEmail = emailData[emailIndex];
+            
+            if (!currentEmail) {
+                showNotification('Email not found', 'error');
+                return;
+            }
+            
+            const spinner = document.getElementById(action + 'Spinner');
+            const button = spinner.parentElement;
+            
+            // Show loading state
+            spinner.style.display = 'inline-block';
+            button.disabled = true;
+            
+            try {
+                let response;
+                if (action === 'accept') {
+                    response = await fetch(`${API_BASE}/emails/${currentEmail.id}/approve`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        credentials: 'include'  // Include session cookies
+                    });
+                } else if (action === 'reject') {
+                    response = await fetch(`${API_BASE}/emails/${currentEmail.id}/reject`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({ reason: 'Rejected via approval hub' }),
+                        credentials: 'include'  // Include session cookies
+                    });
+                }
+                
+                const result = await response.json();
+                
+                if (response.ok && result.status === 'success') {
+                    const message = action === 'accept' ? 'Email approved successfully!' : 'Email rejected successfully!';
+                    const type = action === 'accept' ? 'success' : 'error';
+                    showNotification(message, type);
+                    // Remove from list and reload
+                    setTimeout(() => {
+                        loadEmails();
+                    }, 1000);
+                } else {
+                    throw new Error(result.message || `Failed to ${action} email`);
+                }
+            } catch (error) {
+                console.error(`Error ${action}ing email:`, error);
+                showNotification(`Failed to ${action} email: ${error.message}`, 'error');
+            } finally {
+                spinner.style.display = 'none';
+                button.disabled = false;
+            }
+        }
+        
+
+        function showNotification(message, type) {
+            const notification = document.getElementById('notification');
+            notification.textContent = message;
+            notification.className = `notification ${type}`;
+            notification.classList.add('show');
+            
+            setTimeout(() => {
+                notification.classList.remove('show');
+            }, 3000);
+        }
+
+        // API Configuration - use relative URLs to work with ngrok
+        const API_BASE = '/api';
+        
+        // Load emails from backend
+        async function loadEmails() {
+            try {
+                const response = await fetch(`${API_BASE}/emails`, {
+                    credentials: 'include'  // Include session cookies
+                });
+                if (!response.ok) throw new Error('Failed to fetch emails');
+                
+                const emails = await response.json();
+                emailData.length = 0; // Clear existing data
+                emailData.push(...emails);
+                
+                // Update email list in UI
+                updateEmailList();
+                
+                // Select first email if available
+                if (emails.length > 0) {
+                    selectEmail(0);
+                }
+            } catch (error) {
+                console.error('Error loading emails:', error);
+                showNotification('Failed to load emails from server', 'error');
+            }
+        }
+        
+        function updateEmailList() {
+            const emailListContainer = document.querySelector('.email-list');
+            
+            // Clear existing items except the header
+            const header = emailListContainer.querySelector('h2');
+            emailListContainer.innerHTML = '';
+            emailListContainer.appendChild(header);
+            
+            if (emailData.length === 0) {
+                const noEmailsItem = document.createElement('div');
+                noEmailsItem.className = 'email-item';
+                noEmailsItem.style.fontStyle = 'italic';
+                noEmailsItem.style.color = '#888';
+                noEmailsItem.textContent = 'No pending emails';
+                emailListContainer.appendChild(noEmailsItem);
+                return;
+            }
+            
+            // Add email items
+            emailData.forEach((email, index) => {
+                const emailItem = document.createElement('div');
+                emailItem.className = `email-item ${index === 0 ? 'selected' : ''}`;
+                emailItem.onclick = () => selectEmail(index);
+                
+                // Extract subject from meta or use reason
+                const subjectMatch = email.meta.match(/\| ([^|]+)$/);
+                let subject = subjectMatch ? subjectMatch[1] : (email.reason || 'No Subject');
+                
+                // Truncate long subjects
+                if (subject.length > 22) {
+                    subject = subject.substring(0, 22) + '...';
+                }
+                
+                emailItem.textContent = subject;
+                emailListContainer.appendChild(emailItem);
+            });
+            
+            // Auto-select first email if available
+            if (emailData.length > 0) {
+                selectEmail(0);
+            }
+        }
+        
+        // Initialize application
+        document.addEventListener('DOMContentLoaded', function() {
+            console.log('Initializing MLFA Approval Hub...');
+            loadEmails();
+            
+            // Refresh emails every 10 seconds for real-time updates
+            setInterval(loadEmails, 10000);
+        });
+        
+        // Logout function
+        function logout() {
+            window.location.href = '/logout';
+        }
+        
+    </script>
+</body>
+</html>
