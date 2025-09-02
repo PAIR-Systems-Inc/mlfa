@@ -31,6 +31,7 @@
             border-bottom: 1px solid #30363d;
             text-align: center;
             margin-bottom: 24px;
+            position: relative;
         }
 
         .header h1 {
@@ -458,11 +459,42 @@
             background: #b62324;
             border-color: #b62324;
         }
+        
+        .btn-logout {
+            position: absolute;
+            top: 50%;
+            right: 20px;
+            transform: translateY(-50%);
+            padding: 6px 12px;
+            background: #21262d;
+            color: #f0f6fc;
+            border: 1px solid #30363d;
+            border-radius: 4px;
+            cursor: pointer;
+            font-family: 'Inter', sans-serif;
+            font-size: 12px;
+            font-weight: 500;
+            transition: all 0.15s ease;
+        }
+        
+        .btn-logout:hover {
+            background: #30363d;
+            border-color: #8b949e;
+        }
+        
+        @media (max-width: 768px) {
+            .btn-logout {
+                position: static;
+                transform: none;
+                margin-top: 12px;
+            }
+        }
     </style>
 </head>
 <body>
     <div class="header">
         <h1>Approval Hub for info@mlfa.org</h1>
+        <button class="btn-logout" onclick="logout()">Logout</button>
     </div>
 
     <div class="container">
@@ -520,14 +552,6 @@
                 </button>
             </div>
             
-            <div class="reject-reason" id="rejectReason" style="display: none;">
-                <label for="rejectText">Reason for rejection:</label>
-                <textarea id="rejectText" placeholder="Please provide a reason for rejecting this email..."></textarea>
-                <div class="reject-actions">
-                    <button class="btn btn-cancel" onclick="cancelReject()">Cancel</button>
-                    <button class="btn btn-confirm-reject" onclick="confirmReject()">Confirm Reject</button>
-                </div>
-            </div>
         </div>
         
         <div class="email-original">
@@ -572,12 +596,6 @@
 
 
         async function handleAction(action) {
-            if (action === 'reject') {
-                // Show reject reason textarea
-                document.getElementById('rejectReason').style.display = 'block';
-                document.getElementById('rejectText').focus();
-                return;
-            }
             
             // Get current selected email
             const selectedIndex = document.querySelector('.email-item.selected');
@@ -602,101 +620,48 @@
             button.disabled = true;
             
             try {
-                const response = await fetch(`${API_BASE}/emails/${currentEmail.id}/approve`, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    }
-                });
+                let response;
+                if (action === 'accept') {
+                    response = await fetch(`${API_BASE}/emails/${currentEmail.id}/approve`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        credentials: 'include'  // Include session cookies
+                    });
+                } else if (action === 'reject') {
+                    response = await fetch(`${API_BASE}/emails/${currentEmail.id}/reject`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({ reason: 'Rejected via approval hub' }),
+                        credentials: 'include'  // Include session cookies
+                    });
+                }
                 
                 const result = await response.json();
                 
                 if (response.ok && result.status === 'success') {
-                    showNotification('Email approved successfully!', 'success');
+                    const message = action === 'accept' ? 'Email approved successfully!' : 'Email rejected successfully!';
+                    const type = action === 'accept' ? 'success' : 'error';
+                    showNotification(message, type);
                     // Remove from list and reload
                     setTimeout(() => {
                         loadEmails();
                     }, 1000);
                 } else {
-                    throw new Error(result.message || 'Failed to approve email');
+                    throw new Error(result.message || `Failed to ${action} email`);
                 }
             } catch (error) {
-                console.error('Error approving email:', error);
-                showNotification(`Failed to approve email: ${error.message}`, 'error');
+                console.error(`Error ${action}ing email:`, error);
+                showNotification(`Failed to ${action} email: ${error.message}`, 'error');
             } finally {
                 spinner.style.display = 'none';
                 button.disabled = false;
             }
         }
         
-        function cancelReject() {
-            document.getElementById('rejectReason').style.display = 'none';
-            document.getElementById('rejectText').value = '';
-        }
-        
-        async function confirmReject() {
-            const reason = document.getElementById('rejectText').value.trim();
-            
-            if (!reason) {
-                alert('Please provide a reason for rejection.');
-                return;
-            }
-            
-            // Get current selected email
-            const selectedIndex = document.querySelector('.email-item.selected');
-            if (!selectedIndex) {
-                showNotification('No email selected', 'error');
-                return;
-            }
-            
-            const emailIndex = Array.from(document.querySelectorAll('.email-item')).indexOf(selectedIndex);
-            const currentEmail = emailData[emailIndex];
-            
-            if (!currentEmail) {
-                showNotification('Email not found', 'error');
-                return;
-            }
-            
-            const spinner = document.getElementById('rejectSpinner');
-            const button = document.querySelector('.btn-reject');
-            
-            // Show loading state
-            spinner.style.display = 'inline-block';
-            button.disabled = true;
-            document.querySelector('.btn-confirm-reject').disabled = true;
-            
-            try {
-                const response = await fetch(`${API_BASE}/emails/${currentEmail.id}/reject`, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify({ reason })
-                });
-                
-                const result = await response.json();
-                
-                if (response.ok && result.status === 'success') {
-                    showNotification('Email rejected successfully!', 'error');
-                    // Hide reject reason box
-                    document.getElementById('rejectReason').style.display = 'none';
-                    document.getElementById('rejectText').value = '';
-                    // Remove from list and reload
-                    setTimeout(() => {
-                        loadEmails();
-                    }, 1000);
-                } else {
-                    throw new Error(result.message || 'Failed to reject email');
-                }
-            } catch (error) {
-                console.error('Error rejecting email:', error);
-                showNotification(`Failed to reject email: ${error.message}`, 'error');
-            } finally {
-                spinner.style.display = 'none';
-                button.disabled = false;
-                document.querySelector('.btn-confirm-reject').disabled = false;
-            }
-        }
 
         function showNotification(message, type) {
             const notification = document.getElementById('notification');
@@ -709,13 +674,15 @@
             }, 3000);
         }
 
-        // API Configuration
-        const API_BASE = 'http://localhost:5000/api';
+        // API Configuration - use relative URLs to work with ngrok
+        const API_BASE = '/api';
         
         // Load emails from backend
         async function loadEmails() {
             try {
-                const response = await fetch(`${API_BASE}/emails`);
+                const response = await fetch(`${API_BASE}/emails`, {
+                    credentials: 'include'  // Include session cookies
+                });
                 if (!response.ok) throw new Error('Failed to fetch emails');
                 
                 const emails = await response.json();
@@ -787,13 +754,11 @@
             setInterval(loadEmails, 10000);
         });
         
-        // Close reject reason box when clicking outside
-        document.addEventListener('click', function(event) {
-            const rejectReason = document.getElementById('rejectReason');
-            if (rejectReason.style.display === 'block' && !rejectReason.contains(event.target) && !event.target.classList.contains('btn-reject')) {
-                cancelReject();
-            }
-        });
+        // Logout function
+        function logout() {
+            window.location.href = '/logout';
+        }
+        
     </script>
 </body>
 </html>

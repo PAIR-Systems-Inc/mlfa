@@ -5,7 +5,7 @@ import os, time, openai, json
 import textwrap
 import re
 from bs4 import BeautifulSoup
-from flask import Flask, jsonify, send_from_directory, request
+from flask import Flask, jsonify, send_from_directory, request, session, render_template_string, redirect, url_for
 from flask_cors import CORS
 import threading
 
@@ -16,6 +16,27 @@ load_dotenv()
 
 START_TIME = datetime.now(timezone.utc) - timedelta(weeks=2)
 processed_messages = set()
+
+def load_processed_messages():
+    """Load processed messages from file to prevent reprocessing on restart"""
+    try:
+        with open('processed_messages.txt', 'r') as f:
+            return set(line.strip() for line in f if line.strip())
+    except FileNotFoundError:
+        return set()
+
+def save_processed_messages():
+    """Save processed messages to file"""
+    try:
+        with open('processed_messages.txt', 'w') as f:
+            for msg_id in processed_messages:
+                f.write(f"{msg_id}\n")
+    except Exception as e:
+        print(f"⚠️ Could not save processed messages: {e}")
+
+# Load processed messages at startup
+processed_messages = load_processed_messages()
+print(f"📚 Loaded {len(processed_messages)} processed messages from previous runs")
 
 CLIENT_ID = "b985204d-8506-4bb3-8f54-25899e38c825"
 CLIENT_SECRET = os.getenv("O365_CLIENT_SECRET")
@@ -32,19 +53,37 @@ SKIP_CATEGORIES = {'spam', 'cold_outreach', 'newsletter', 'irrelevant_other'}
 
 HUMAN_CHECK = True  # Enable human check for approval hub
 
-# Simple storage for current email data
-current_email_data = {
-    "subject": "",
-    "body": "",
-    "classification": {},
-    "sender": "",
-    "received": "",
-    "message_obj": None  # Store the actual message object for processing
-}
+# Storage for multiple pending emails
+pending_emails = {}  # Dictionary to store multiple emails by ID
+current_email_id = None  # Track which email is currently being shown
 
 # Flask app for approval hub
 app = Flask(__name__, static_folder='.')
-CORS(app)
+app.secret_key = os.getenv('SECRET_KEY', 'mlfa-email-hub-2024')  # Change this in production
+app.config['SESSION_COOKIE_SECURE'] = False  # Set to True in production with HTTPS
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+CORS(app, supports_credentials=True)
+
+# Simple password (set in .env or use default)
+ADMIN_PASSWORD = os.getenv('ADMIN_PASSWORD', 'MLFA2024secure!')
+
+def login_required(f):
+    def decorated_function(*args, **kwargs):
+        logged_in = session.get('logged_in')
+        print(f"🔍 Checking auth for {request.path}: logged_in={logged_in}, session={dict(session)}")
+        
+        if not logged_in:
+            if request.path.startswith('/api/'):
+                # For API calls, return JSON error instead of redirect
+                print(f"❌ API call denied - not logged in")
+                return jsonify({"error": "Authentication required"}), 401
+            print(f"❌ Redirecting to login")
+            return redirect(url_for('login'))
+        
+        print(f"✅ Authentication passed")
+        return f(*args, **kwargs)
+    decorated_function.__name__ = f.__name__
+    return decorated_function
 
 
 
@@ -98,94 +137,96 @@ def save_last_delta(inbox_token, junk_token):
 #A json script that includes the category of the email, who it needs to be forwarded to, and why. 
 
 def classify_email(subject, body):
-    prompt = f"""
-You are an email routing assistant for MLFA (Muslim Legal Fund of America), a nonprofit organization focused on legal advocacy for Muslims in the United States.
+    prompt = f"""You are an email routing assistant for MLFA (Muslim Legal Fund of America), a nonprofit organization focused on legal advocacy for Muslims in the United States.
 
-Your job is to classify incoming emails based on their **content, sender intent, and relevance** to MLFA’s mission. Do not rely on keywords alone. Use the routing rules below to assign one or more categories and determine appropriate recipients if applicable.
-Additionally, **identify the sender’s name** when possible and include it as `name_sender` in the JSON. Prefer the “From” display name; if unavailable or generic, use a clear sign-off/signature in the body. If you cannot determine the name confidently, set `name_sender` to `"Sender"`.
+    Your job is to classify incoming emails based on their **content, sender intent, and relevance** to MLFA’s mission. Do not rely on keywords alone. Use the routing rules below to assign one or more categories and determine appropriate recipients if applicable.
+    Additionally, **identify the sender’s name** when possible and include it as `name_sender` in the JSON. Prefer the “From” display name; if unavailable or generic, use a clear sign-off/signature in the body. If you cannot determine the name confidently, set `name_sender` to `"Sender"`.
 
-HUMAN-STYLE REPLY ESCALATION (IMPORTANT):
-Flag emails that should NOT get a generic auto-reply because they are personal/referral-like or contain substantial case detail.
-Set `needs_personal_reply=true` if ANY of these are present:
-- **Referral signals:** mentions of being referred by a person/org (e.g., imam, attorney, community leader, “X told me to contact you,” CC’ing a referrer).
-- **Personal narrative with specifics:** detailed timeline, names, dates, locations, docket/case numbers, court filings, detention/deportation details, attorney names, or attached evidence.
-- **Clearly individualized appeal:** tone reads as one-to-one help-seeking rather than a form blast.
-- **Brevity & Generic Content safeguard:** If the email is *short, vague, and generic* (e.g., “I need legal help” or “Please assist”), and does **not** include referral language or specific personal details, then set `needs_personal_reply=false` even if it asks for help.
+    HUMAN-STYLE REPLY ESCALATION (IMPORTANT):
+    Flag emails that should NOT get a generic auto-reply because they are personal/referral-like or contain substantial case detail.
+    Set `needs_personal_reply=true` if ANY of these are present:
+    - **Referral signals:** mentions of being referred by a person/org (e.g., imam, attorney, community leader, “X told me to contact you,” CC’ing a referrer).
+    - **Personal narrative with specifics:** detailed timeline, names, dates, locations, docket/case numbers, court filings, detention/deportation details, attorney names, or attached evidence.
+    - **Clearly individualized appeal:** tone reads as one-to-one help-seeking rather than a form blast.
+    - **Brevity & Generic Content safeguard:** If the email is *short, vague, and generic* (e.g., “I need legal help” or “Please assist”), and does **not** include referral language or specific personal details, then set `needs_personal_reply=false` even if it asks for help.
 
-If none of the above apply, set `needs_personal_reply=false`.
+    If none of the above apply, set `needs_personal_reply=false`.
 
-ROUTING RULES & RECIPIENTS:
+    ROUTING RULES & RECIPIENTS:
 
-- **Legal inquiries** → If someone is explicitly **asking for legal help or representation**, categorize as `"legal"`. These users should be referred to MLFA’s "Apply for Help" form (no forwarding needed).
+    - **Legal inquiries** → If someone is explicitly **asking for legal help or representation**, categorize as `"legal"`. These users should be referred to MLFA’s "Apply for Help" form (no forwarding needed).
 
-- **Donor-related inquiries** → Categorize as `"donor"` only if the **sender is a donor** or is asking about a **specific donation**, such as issues with payment, receipts, or donation follow-ups. Forward to:
-Mujahid.rasul@mlfa.org, Syeda.sadiqa@mlfa.org
+    - **Donor-related inquiries** → Categorize as `"donor"` only if the **sender is a donor** or is asking about a **specific donation**, such as issues with payment, receipts, or donation follow-ups. Forward to:
+    Mujahid.rasul@mlfa.org, Syeda.sadiqa@mlfa.org
 
-- **Sponsorship requests** → If someone is **requesting sponsorship or financial support from MLFA**, categorize as `"sponsorship"`. Forward to:
-Arshia.ali.khan@mlfa.org, Maria.laura@mlfa.org
+    - **Sponsorship requests** → If someone is **requesting sponsorship or financial support from MLFA**, categorize as `"sponsorship"`. Forward to:
+    Arshia.ali.khan@mlfa.org, Maria.laura@mlfa.org
 
-- **Fellowship inquiries** → If someone is **applying for, asking about, or offering a fellowship** (legal, advocacy, or nonprofit-focused), categorize as `"fellowship"`. Forward to:
-aisha.ukiu@mlfa.org
+    - **Fellowship inquiries** → If someone is **applying for, asking about, or offering a fellowship** (legal, advocacy, or nonprofit-focused), categorize as `"fellowship"`. Forward to:
+    aisha.ukiu@mlfa.org
 
-- **Organizational questions** → If the sender is asking about **MLFA’s internal operations**, such as leadership, partnerships, volunteering, employment, or collaboration, categorize as `"organizational"`. Forward to:
-Arshia.ali.khan@mlfa.org, Maria.laura@mlfa.org
+    - **Organizational questions** → If the sender is asking about **MLFA’s internal operations**, such as leadership, partnerships, or collaboration, categorize as `"organizational"`. Forward to:
+    Arshia.ali.khan@mlfa.org, Maria.laura@mlfa.org
 
-- **Volunteer inquiries** → If someone is **offering to volunteer** their time or skills to MLFA **or** is **asking about volunteering** (for themselves or on behalf of someone else), categorize as `"volunteer"`. Forward to:
-aisha.ukiu@mlfa.org
+    - **Volunteer inquiries** → If someone is **offering to volunteer** their time or skills to MLFA **or** is **asking about volunteering** (for themselves or on behalf of someone else), categorize as `"volunteer"`. Forward to:
+    aisha.ukiu@mlfa.org
 
-- **Job applications** → If someone is **applying for a paid job**, sending a resume, or asking about open employment positions, categorize as `"job_application"`. Forward to:
-shawn@strategichradvisory.com
+    - **Job applications** → If someone is **applying for a paid job**, sending a resume, or asking about open employment positions, categorize as `"job_application"`. Forward to:
+    shawn@strategichradvisory.com
 
-- **Internship applications** → If someone is **applying for an internship** (paid or unpaid), sending a resume for an internship program, or inquiring about internship opportunities, categorize as `"internship"`. Forward to:
-aisha.ukiu@mlfa.org
+    - **Internship applications** → If someone is **applying for an internship** (paid or unpaid), sending a resume for an internship program, or inquiring about internship opportunities, categorize as `"internship"`. Forward to:
+    aisha.ukiu@mlfa.org
 
-- **Email marketing/sales** → If the sender is **offering a product, service, or software**, categorize as `"marketing"` only if:
-  1) The offering is **relevant to MLFA’s nonprofit or legal work**, **and**
-  2) The sender shows **clear contextual awareness** (e.g., refers to MLFA’s legal mission, Muslim families, or nonprofit context), **and**
-  3) The product is **niche-specific**, such as legal case management, zakat compliance tools, intake systems for nonprofits, or Islamic legal software.
-Move to the "Sales emails" folder.
-**Do not treat generic, untargeted, or mass-promotional emails as marketing.**
+    - **Media inquiries** → If the sender is a **reporter or journalist asking for comments, interviews, or statements**, categorize as `"media"`. Forward to:
+    Marium.Uddin@mlfa.org
 
-- **Cold outreach** → Any **unsolicited sales email** that lacks clear tailoring to MLFA’s work. Categorize as `"cold_outreach"` if:
-  - The sender shows **no meaningful awareness** of MLFA’s mission
-  - The offer is **broad, mass-marketed, or hype-driven**
-  - The email uses commercial hooks like “Act now,” “800% increase,” “Only $99/month,” or “Click here”
-Even if the topic sounds legal or nonprofit-adjacent, if it **feels generic**, classify it as cold outreach.
-Mark as read; **do not** treat as marketing.
+    - **Email marketing/sales** → If the sender is **offering a product, service, or software**, categorize as `"marketing"` only if:
+    1) The offering is **relevant to MLFA’s nonprofit or legal work**, **and**
+    2) The sender shows **clear contextual awareness** (e.g., refers to MLFA’s legal mission, Muslim families, or nonprofit context), **and**
+    3) The product is **niche-specific**, such as legal case management, zakat compliance tools, intake systems for nonprofits, or Islamic legal software.
+    Move to the "Sales emails" folder.
+    **Do not treat generic, untargeted, or mass-promotional emails as marketing.**
 
-- **Spam** → Obvious scams, phishing, AI-generated nonsense, or malicious intent. Move to Junk.
+    - **Cold outreach** → Any **unsolicited sales email** that lacks clear tailoring to MLFA’s work. Categorize as `"cold_outreach"` if:
+    - The sender shows **no meaningful awareness** of MLFA’s mission
+    - The offer is **broad, mass-marketed, or hype-driven**
+    - The email uses commercial hooks like “Act now,” “800% increase,” “Only $99/month,” or “Click here”
+    Even if the topic sounds legal or nonprofit-adjacent, if it **feels generic**, classify it as cold outreach.
+    Mark as read; **do not** treat as marketing.
 
-- **Newsletter** → Bulk content like PR updates, blog digests, or mass announcements not addressed to MLFA directly. Place in "Newsletters" if available.
+    - **Spam** → Obvious scams, phishing, AI-generated nonsense, or malicious intent. Move to Junk.
 
-- **Irrelevant (other)** → Anything that doesn't match the above and is unrelated to MLFA’s mission — e.g., misdirected emails, general inquiries, or off-topic messages. Mark as read and ignore.
+    - **Newsletter** → Bulk content like PR updates, blog digests, or mass announcements not addressed to MLFA directly. Place in "Newsletters" if available.
 
-IMPORTANT GUIDELINES:
-1. Focus on **relevance and specificity**, not just keywords. The more the sender understands MLFA, the more likely it is to be legitimate.
-2. If an email is a **niche legal tech offer clearly crafted for MLFA or Muslim nonprofits**, treat it as `"marketing"` — even if unsolicited.
-3. If the offer is **generic or clearly sent in bulk**, it’s `"cold_outreach"` — even if it references legal themes or Muslim communities.
-4. Never mark cold outreach or mass sales emails as `"marketing"`, even if they reference MLFA’s field.
-5. If someone is **offering legal services**, classify as `"organizational"` only if relevant and serious (not promotional).
-6. Emails can and should have **multiple categories** when appropriate (e.g., a donor asking to volunteer → `"donor"` and `"volunteer"`).
-7. Use `all_recipients` only for forwarded categories: `"donor"`, `"sponsorship"`, `"fellowship"`, `"organizational"`, `"volunteer"`, `"job_application"`, `"internship"`.
-8. For `"legal"`, `"marketing"`, and all `"irrelevant"` types, leave `all_recipients` empty.
+    - **Irrelevant (other)** → Anything that doesn't match the above and is unrelated to MLFA’s mission — e.g., misdirected emails, general inquiries, or off-topic messages. Mark as read and ignore.
 
-PRIORITY & TIES:
-- If `"legal"` applies, **still include all other relevant categories** — `"legal"` is additive, never exclusive.
-- `"marketing"` vs `"cold_outreach"`: choose only one based on tailoring (see rules above).
+    IMPORTANT GUIDELINES:
+    1. Focus on **relevance and specificity**, not just keywords. The more the sender understands MLFA, the more likely it is to be legitimate.
+    2. If an email is a **niche legal tech offer clearly crafted for MLFA or Muslim nonprofits**, treat it as `"marketing"` — even if unsolicited.
+    3. If the offer is **generic or clearly sent in bulk**, it’s `"cold_outreach"` — even if it references legal themes or Muslim communities.
+    4. Never mark cold outreach or mass sales emails as `"marketing"`, even if they reference MLFA’s field.
+    5. If someone is **offering legal services**, classify as `"organizational"` only if relevant and serious (not promotional).
+    6. Emails can and should have **multiple categories** when appropriate (e.g., a donor asking to volunteer → `"donor"` and `"volunteer"`).
+    7. Use `all_recipients` only for forwarded categories: `"donor"`, `"sponsorship"`, `"fellowship"`, `"organizational"`, `"volunteer"`, `"job_application"`, `"internship"`, `"media"`.
+    8. For `"legal"`, `"marketing"`, and all `"irrelevant"` types, leave `all_recipients` empty.
 
-Return a JSON object with:
-- `categories`: array from ["legal","donor","sponsorship","fellowship","organizational","volunteer","job_application","internship","marketing","spam","cold_outreach","newsletter","irrelevant_other"]
-- `all_recipients`: list of MLFA email addresses (may be empty)
-- `needs_personal_reply`: boolean per the Escalation section
-- `reason`: dictionary mapping each category to a brief justification
-- `escalation_reason`: brief string explaining why `needs_personal_reply` is true (empty string if false)
-- `name_sender`: the sender’s name if confidently identified; otherwise exactly `"Sender"`
+    PRIORITY & TIES:
+    - If `"legal"` applies, **still include all other relevant categories** — `"legal"` is additive, never exclusive.
+    - `"marketing"` vs `"cold_outreach"`: choose only one based on tailoring (see rules above).
 
-Subject: {subject}
+    Return a JSON object with:
+    - `categories`: array from ["legal","donor","sponsorship","fellowship","organizational","volunteer","job_application","internship","media","marketing","spam","cold_outreach","newsletter","irrelevant_other"]
+    - `all_recipients`: list of MLFA email addresses (may be empty)
+    - `needs_personal_reply`: boolean per the Escalation section
+    - `reason`: dictionary mapping each category to a brief justification
+    - `escalation_reason`: brief string explaining why `needs_personal_reply` is true (empty string if false)
+    - `name_sender`: the sender’s name if confidently identified; otherwise exactly `"Sender"`
 
-Body:
-{body}
-"""
+    Subject: {subject}
+
+    Body:
+    {body}
+    """
 
 
     try:
@@ -215,7 +256,7 @@ def process_folder(folder, name, delta_token):
     if delta_token:
         qs = qs.delta_token(delta_token)
     qs = qs.select([
-        'id', 'conversationId', 'isRead', 'receivedDateTime', 'from', 'sender', 'subject'
+        'id', 'conversationId', 'isRead', 'receivedDateTime', 'from', 'sender', 'subject', 'categories'
     ])
 
     try:
@@ -228,11 +269,19 @@ def process_folder(folder, name, delta_token):
                 # Fallback: skip if no conversation id (rare)
                 dedup_key = getattr(msg, 'internet_message_id', None) or msg.object_id
                 if dedup_key in processed_messages:
+                    print(f"⏭️  Already processed message (dedup), skipping: {getattr(msg, 'subject', 'Unknown')}")
                     continue
                 try:
                     msg.refresh()
                 except Exception:
                     pass
+                
+                # Skip if already processed (marked with PAIRActioned)
+                if any((c or '').startswith('PAIRActioned') for c in (msg.categories or [])):
+                    print(f"⏭️  Already processed message (categories), skipping: {msg.subject}")
+                    processed_messages.add(dedup_key)
+                    continue
+                
                 # If this solitary item is unread, process it as a last resort
                 if not msg.is_read:
                     # Internal-reply detection (rare path)
@@ -245,23 +294,26 @@ def process_folder(folder, name, delta_token):
                         continue
 
                     body_to_analyze = get_clean_message_text(msg)
-                    if any((c or '').startswith('PAIRActioned') for c in (msg.categories or [])):
-                        processed_messages.add(dedup_key)
-                        continue
 
                     print(f"\nNEW:  [{name}] {msg.received.strftime('%Y-%m-%d %H:%M')} | "
                           f"{msg.sender.address if msg.sender else 'UNKNOWN'} | {msg.subject}")
                     result = classify_email(msg.subject, body_to_analyze)
                     if HUMAN_CHECK: 
                         print(json.dumps(result, indent=2))
-                        # Store current email data
-                        current_email_data["subject"] = msg.subject
-                        current_email_data["body"] = body_to_analyze
-                        current_email_data["classification"] = result
-                        current_email_data["sender"] = msg.sender.address
-                        current_email_data["received"] = msg.received.strftime('%Y-%m-%d %H:%M')
-                        current_email_data["message_obj"] = msg
-                        print(f"📧 Email stored for approval: {msg.subject}")
+                        # Skip if this email is already in pending queue (prevent duplicates)
+                        email_id = msg.object_id
+                        if email_id not in pending_emails:
+                            pending_emails[email_id] = {
+                                "subject": msg.subject,
+                                "body": body_to_analyze,
+                                "classification": result,
+                                "sender": msg.sender.address,
+                                "received": msg.received.strftime('%Y-%m-%d %H:%M'),
+                                "message_obj": msg
+                            }
+                            print(f"📧 Email stored for approval: {msg.subject}")
+                        else:
+                            print(f"⏭️  Email already in pending queue, skipping: {msg.subject}")
                         processed_messages.add(dedup_key)
                     else: 
                         print(json.dumps(result, indent=2))
@@ -284,6 +336,7 @@ def process_folder(folder, name, delta_token):
             for child in unread_msgs:
                 dedup_key = getattr(child, 'internet_message_id', None) or child.object_id
                 if dedup_key in processed_messages:
+                    print(f"⏭️  Already processed message (dedup), skipping: {child.subject}")
                     continue
 
                 # Make sure we have up-to-date fields on the child
@@ -291,6 +344,12 @@ def process_folder(folder, name, delta_token):
                     child.refresh()
                 except Exception:
                     pass
+
+                # Skip if already processed (marked with PAIRActioned)
+                if any((c or '').startswith('PAIRActioned') for c in (child.categories or [])):
+                    print(f"⏭️  Already processed message (categories), skipping: {child.subject}")
+                    processed_messages.add(dedup_key)
+                    continue
 
                 # 1) Internal reply path (staff replies captured by your hidden REPLY_ID_TAG)
                 sender_addr = (child.sender.address or "").lower() if child.sender else ""
@@ -303,11 +362,6 @@ def process_folder(folder, name, delta_token):
                     processed_messages.add(dedup_key)
                     continue
 
-                # 2) Skip if already actioned
-                if any((c or '').startswith('PAIRActioned') for c in (child.categories or [])):
-                    processed_messages.add(dedup_key)
-                    continue
-
                 # 3) Classify using reply-only text, then handle
                 body_to_analyze = get_clean_message_text(child)
                 print(f"\nNEW:  [{name}] {child.received.strftime('%Y-%m-%d %H:%M')} | "
@@ -316,14 +370,20 @@ def process_folder(folder, name, delta_token):
                 print(json.dumps(result, indent=2))
                 
                 if HUMAN_CHECK:
-                    # Store current email data
-                    current_email_data["subject"] = child.subject
-                    current_email_data["body"] = body_to_analyze
-                    current_email_data["classification"] = result
-                    current_email_data["sender"] = child.sender.address
-                    current_email_data["received"] = child.received.strftime('%Y-%m-%d %H:%M')
-                    current_email_data["message_obj"] = child
-                    print(f"📧 Email stored for approval: {child.subject}")
+                    # Skip if this email is already in pending queue (prevent duplicates)
+                    email_id = child.object_id
+                    if email_id not in pending_emails:
+                        pending_emails[email_id] = {
+                            "subject": child.subject,
+                            "body": body_to_analyze,
+                            "classification": result,
+                            "sender": child.sender.address,
+                            "received": child.received.strftime('%Y-%m-%d %H:%M'),
+                            "message_obj": child
+                        }
+                        print(f"📧 Email stored for approval: {child.subject}")
+                    else:
+                        print(f"⏭️  Email already in pending queue, skipping: {child.subject}")
                 else:
                     handle_new_email(child, result)
 
@@ -382,27 +442,22 @@ def handle_emails(categories, result, recipients_set, msg, name_sender):
                 reply_message.body = f"""
                     <p>Dear {name_sender},</p>
 
-                    <p>Thank you for reaching out to the Muslim Legal Fund of America (MLFA). 
-                    We deeply appreciate you taking the time to contact us and share your situation.</p>
+                    <p>Thank you for contacting the Muslim Legal Fund of America (MLFA). 
+                    We are grateful that you reached out and placed your trust in us to potentially support your legal matter.</p>
 
-                    <p>We understand that seeking legal assistance can be a challenging and emotional process, 
-                    and we want you to know that we take every inquiry seriously. Your trust in MLFA to 
-                    potentially help with your legal matter means a great deal to us.</p>
-
-                    <p>If you have not already done so, please submit a formal application for legal assistance through our website: <br>
+                    <p>If you have not already done so, please submit a formal application for legal assistance through our website:<br>
                     <a href="https://mlfa.org/application-for-legal-assistance/">https://mlfa.org/application-for-legal-assistance/</a></p>
 
-                    <p>Our team reviews each application carefully, and we will be in touch with you regarding 
-                    next steps. If you have any questions about the application process or need help 
-                    completing it, please don't hesitate to reach out.</p>
+                    <p>Once submitted, our team will carefully review your application and follow up with next steps. 
+                    If you have any questions about the application process or need help completing it, please don't hesitate to reach out.</p>
 
-                    <p>We appreciate your patience as we work through applications, and we look forward to 
-                    learning more about how we might be able to help.</p>
+                    <p>We appreciate your patience as we work through applications, and we look forward to learning more about how we might be able to help.</p>
 
                     <p>Warm regards,<br>
                     The MLFA Team<br>
                     Muslim Legal Fund of America</p>
                 """
+
                 reply_message.body_type = "HTML"
             else:
                 reply_message.body = f"""
@@ -410,15 +465,16 @@ def handle_emails(categories, result, recipients_set, msg, name_sender):
 
                     <p>Thank you for contacting the Muslim Legal Fund of America (MLFA).</p>
 
-                   <p> If you have not already done so, please submit a formal application for legal assistance through our website:  
-                    https://mlfa.org/application-for-legal-assistance/</p>
+                    <p>If you have not already done so, please submit a formal application for legal assistance 
+                    through our website:<br>
+                    <a href="https://mlfa.org/application-for-legal-assistance/">https://mlfa.org/application-for-legal-assistance/</a></p>
 
                     <p>This ensures our legal team has the information needed to review your case promptly.</p>
 
-                    <p>Sincerely, <br> 
+                    <p>Sincerely,<br>
                     The MLFA Team</p>
-
                 """
+
                 reply_message.body_type = "HTML"
             reply_message.send()
 
@@ -636,64 +692,238 @@ def get_clean_message_text(msg):
 
 
 
-# Flask routes for approval hub
+# Login page template
+LOGIN_TEMPLATE = '''
+<!DOCTYPE html>
+<html>
+<head>
+    <title>MLFA Email Hub - Login</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600&family=Inter:wght@300;400;500;600&display=swap');
+        
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: #0d1117;
+            color: #f0f6fc;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0;
+            font-size: 14px;
+            line-height: 1.5;
+        }
+        
+        .login-container {
+            width: 100%;
+            max-width: 400px;
+            padding: 20px;
+        }
+        
+        .login-header {
+            text-align: center;
+            margin-bottom: 32px;
+        }
+        
+        .login-header h1 {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 18px;
+            font-weight: 500;
+            color: #58a6ff;
+            margin: 0;
+            letter-spacing: -0.025em;
+        }
+        
+        .login-box {
+            background: #161b22;
+            padding: 32px;
+            border-radius: 6px;
+            border: 1px solid #30363d;
+            width: 100%;
+        }
+        
+        .login-box input[type="password"] {
+            width: 100%;
+            padding: 12px;
+            margin-bottom: 16px;
+            background: #0d1117;
+            border: 1px solid #30363d;
+            border-radius: 4px;
+            color: #f0f6fc;
+            font-size: 14px;
+            font-family: 'JetBrains Mono', monospace;
+            transition: border-color 0.15s ease;
+        }
+        
+        .login-box input[type="password"]:focus {
+            outline: none;
+            border-color: #58a6ff;
+        }
+        
+        .login-box input[type="password"]::placeholder {
+            color: #7d8590;
+            font-family: 'JetBrains Mono', monospace;
+        }
+        
+        .login-box button {
+            width: 100%;
+            padding: 8px 16px;
+            background: #238636;
+            border: 1px solid #238636;
+            border-radius: 4px;
+            color: #f0f6fc;
+            font-size: 13px;
+            font-weight: 500;
+            cursor: pointer;
+            font-family: 'Inter', sans-serif;
+            transition: all 0.15s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 32px;
+        }
+        
+        .login-box button:hover {
+            background: #2ea043;
+            border-color: #2ea043;
+        }
+        
+        .error {
+            color: #f85149;
+            margin-bottom: 16px;
+            font-size: 13px;
+            font-family: 'Inter', sans-serif;
+            text-align: center;
+            padding: 8px 12px;
+            background: #0d1117;
+            border: 1px solid #da3633;
+            border-radius: 4px;
+        }
+        
+        @media (max-width: 768px) {
+            .login-container {
+                padding: 16px;
+            }
+            .login-box {
+                padding: 24px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="login-container">
+        <div class="login-header">
+            <h1>Approval Hub for info@mlfa.org</h1>
+        </div>
+        <div class="login-box">
+            {% if error %}
+            <div class="error">{{ error }}</div>
+            {% endif %}
+            <form method="post">
+                <input type="password" name="password" placeholder="enter password" required autofocus>
+                <button type="submit">Login</button>
+            </form>
+        </div>
+    </div>
+</body>
+</html>
+'''
+
+# Flask routes
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        password = request.form.get('password')
+        if password == ADMIN_PASSWORD:
+            session['logged_in'] = True
+            session.permanent = True
+            print(f"✅ User logged in successfully, session ID: {session.get('logged_in')}")
+            return redirect(url_for('index'))
+        else:
+            print(f"❌ Login failed with password: {password}")
+            return render_template_string(LOGIN_TEMPLATE, error='Invalid password')
+    return render_template_string(LOGIN_TEMPLATE)
+
+@app.route('/logout')
+def logout():
+    session.pop('logged_in', None)
+    return redirect(url_for('login'))
+
 @app.route('/')
+@login_required
 def index():
     return send_from_directory('.', 'approval-hub.html')
 
 @app.route('/api/emails')
+@login_required
 def get_emails():
-    if current_email_data["subject"]:
+    print(f"📧 API call to /api/emails - pending emails count: {len(pending_emails)}")
+    emails = []
+    for email_id, email_data in pending_emails.items():
         # Format data for the interface
-        categories = current_email_data["classification"].get('categories', [])
+        categories = email_data["classification"].get('categories', [])
         category_display = ', '.join([cat.replace('_', ' ').title() for cat in categories])
         
-        recipients = current_email_data["classification"].get('all_recipients', [])
+        recipients = email_data["classification"].get('all_recipients', [])
         recipients_display = ', '.join(recipients) if recipients else 'None'
         
-        reasons = current_email_data["classification"].get('reason', {})
+        reasons = email_data["classification"].get('reason', {})
         reason_display = '; '.join(reasons.values()) if reasons else 'No reason provided'
         
         email = {
-            "id": "current",
-            "meta": f"FROM: [INBOX] {current_email_data['received']} | {current_email_data['sender']} | {current_email_data['subject']}",
-            "senderName": current_email_data["classification"].get('name_sender', 'Unknown'),
+            "id": email_id,
+            "meta": f"FROM: [INBOX] {email_data['received']} | {email_data['sender']} | {email_data['subject']}",
+            "senderName": email_data["classification"].get('name_sender', 'Unknown'),
             "category": category_display,
             "recipients": recipients_display,
-            "needsReply": "Yes" if current_email_data["classification"].get('needs_personal_reply', False) else "No",
+            "needsReply": "Yes" if email_data["classification"].get('needs_personal_reply', False) else "No",
             "reason": reason_display,
-            "escalation": current_email_data["classification"].get('escalation_reason') or 'None',
-            "originalContent": current_email_data["body"],
+            "escalation": email_data["classification"].get('escalation_reason') or 'None',
+            "originalContent": email_data["body"],
             "status": "pending"
         }
-        return jsonify([email])
-    else:
-        return jsonify([])
+        emails.append(email)
+    return jsonify(emails)
 
 @app.route('/api/emails/<email_id>/approve', methods=['POST'])
+@login_required
 def approve_email(email_id):
-    if current_email_data["subject"] and current_email_data["message_obj"]:
-        msg = current_email_data["message_obj"]
-        classification = current_email_data["classification"]
+    if email_id in pending_emails:
+        email_data = pending_emails[email_id]
+        msg = email_data["message_obj"]
+        classification = email_data["classification"]
         
-        print(f"✅ Email approved: {current_email_data['subject']} - Processing normally")
+        print(f"✅ Email approved: {email_data['subject']} - Processing normally")
         
         # Process the email normally using the stored message and classification
         handle_new_email(msg, classification)
         
-    # Clear the current email
-    current_email_data.clear()
-    current_email_data.update({"subject": "", "body": "", "classification": {}, "sender": "", "received": "", "message_obj": None})
+        # Add to processed messages to prevent reappearance
+        dedup_key = getattr(msg, 'internet_message_id', None) or msg.object_id
+        processed_messages.add(dedup_key)
+        processed_messages.add(email_id)  # Also add the email_id itself
+        
+        # Remove from pending emails
+        del pending_emails[email_id]
+        
     return jsonify({"status": "success", "message": "Email approved and will be processed normally"})
 
 @app.route('/api/emails/<email_id>/reject', methods=['POST'])
+@login_required
 def reject_email(email_id):
     data = request.get_json()
     reason = data.get('reason', 'No reason provided')
     
-    if current_email_data["subject"] and current_email_data["message_obj"]:
-        msg = current_email_data["message_obj"]
-        print(f"❌ Email rejected: {current_email_data['subject']} - Reason: {reason}")
+    if email_id in pending_emails:
+        email_data = pending_emails[email_id]
+        msg = email_data["message_obj"]
+        print(f"❌ Email rejected: {email_data['subject']} - Reason: {reason}")
         
         # Move rejected email to special folder
         try:
@@ -729,21 +959,23 @@ def reject_email(email_id):
             except Exception as e:
                 print(f"⚠️ Could not update email categories: {e}")
             
+            
             # Mark as read and add to processed messages to prevent reprocessing
             try:
                 mark_as_read(msg)
                 dedup_key = getattr(msg, 'internet_message_id', None) or msg.object_id
                 processed_messages.add(dedup_key)
+                processed_messages.add(email_id)  # Also add the email_id itself
                 print(f"✅ Marked email as processed")
             except Exception as e:
                 print(f"⚠️ Could not mark as processed: {e}")
             
         except Exception as e:
             print(f"❌ Error handling rejected email: {e}")
+        
+        # Remove from pending emails
+        del pending_emails[email_id]
     
-    # Clear the current email
-    current_email_data.clear()
-    current_email_data.update({"subject": "", "body": "", "classification": {}, "sender": "", "received": "", "message_obj": None})
     return jsonify({"status": "success", "message": f"Email rejected: {reason}"})
 
 
@@ -765,8 +997,11 @@ print(f"Monitoring inbox + junk for: {EMAIL_TO_WATCH} … Ctrl-C to stop.")
 print(f"📧 Approval hub available at: http://localhost:5000")
 
 while True:
+    print(f"🔄 Checking for new emails... (Pending: {len(pending_emails)}, Processed: {len(processed_messages)})")
     inbox_delta = process_folder(inbox_folder, "INBOX", inbox_delta)
     junk_delta = process_folder(junk_folder, "JUNK", junk_delta)
     #gets the new delta tokens and then saves them,
     save_last_delta(inbox_delta, junk_delta)
+    # Also save processed messages regularly
+    save_processed_messages()
     time.sleep(10)

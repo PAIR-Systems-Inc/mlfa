@@ -1,0 +1,8 @@
+.venv/
+.env
+*.env
+src/.env
+o365_token.txt
+src/o365_token.txt
+processed_messages.txt
+src/processed_messages.txt
