@@ -200,81 +200,102 @@ def graph_delta_sync(folder_name, folder_id, delta_url=None, since_utc_iso=None)
     return changes, final_delta_url
 
 def process_graph_message(message_data, folder_name):
-    """Process a message from Microsoft Graph API response"""
+    """
+    Hydrate an O365 Message by id and process it with existing pipeline.
+    Falls back safely if already read / already tagged.
+    """
     try:
-        # Extract key fields from Graph API response
-        msg_id = message_data.get('id', '')
-        subject = message_data.get('subject', 'No subject')
-        sender_info = message_data.get('from', {}).get('emailAddress', {})
-        sender_address = sender_info.get('address', 'Unknown')
-        received_datetime = message_data.get('receivedDateTime', '')
-        is_read = message_data.get('isRead', False)
-        categories = message_data.get('categories', [])
-        body_content = message_data.get('body', {}).get('content', '')
-        
-        print(f"\n🔍 Processing message from Graph API:")
-        print(f"    ID: {msg_id}")
-        print(f"    Subject: {subject}")
-        print(f"    From: {sender_address}")
-        print(f"    Received: {received_datetime}")
-        print(f"    Read: {is_read}")
-        print(f"    Categories: {categories}")
-        
-        # Skip if already processed (marked with PAIRActioned)
-        if any((c or '').startswith('PAIRActioned') for c in categories):
-            print(f"⏭️ Skipping already processed message: {subject}")
+        msg_id = message_data.get('id')
+        if not msg_id:
             return
-        
-        # Skip if already read (unless it's an internal reply)
-        if is_read:
-            print(f"⏭️ Skipping read message: {subject}")
+
+        # Hydrate SDK message so the rest of your pipeline just works
+        msg = mailbox.get_message(object_id=msg_id)
+        if not msg:
+            print(f"⚠️ Could not hydrate message {msg_id}")
             return
-            
-        # TODO: Convert Graph API message data to format compatible with existing handle_new_email function
-        # This will require creating a message-like object or adapting handle_new_email to work with Graph data
-        
-        print(f"🎯 Would process: {subject} from {sender_address}")
-        
+
+        # Skip if already processed or read
+        if any((c or '').startswith('PAIRActioned') for c in (msg.categories or [])):
+            return
+        if msg.is_read:
+            return
+
+        # Use your existing cleaner + classifier + handler
+        body_to_analyze = get_clean_message_text(msg) or (message_data.get('body', {}) or {}).get('content', '') or ''
+        print(f"\nNEW[{folder_name.upper()}]: {msg.received.strftime('%Y-%m-%d %H:%M') if msg.received else ''} | "
+              f"{msg.sender.address if msg.sender else 'UNKNOWN'} | {msg.subject}")
+
+        result = classify_email(msg.subject, body_to_analyze)
+        if HUMAN_CHECK:
+            email_id = msg.object_id
+            if email_id not in pending_emails:
+                pending_emails[email_id] = {
+                    "subject": msg.subject,
+                    "body": body_to_analyze,
+                    "classification": result,
+                    "sender": msg.sender.address if msg.sender else "Unknown",
+                    "received": msg.received.strftime('%Y-%m-%d %H:%M') if msg.received else "Unknown",
+                    "message_obj": msg
+                }
+                print(f"📧 Email stored for approval: {msg.subject}")
+        else:
+            handle_new_email(msg, result)
+
     except Exception as e:
         print(f"❌ Error processing Graph message: {e}")
+
 
 def process_folders_with_graph_api():
     """Process both inbox and junk folders using direct Microsoft Graph API"""
     try:
         folder_ids = get_folder_ids()
-        start_time_iso = START_TIME.isoformat()
-        
+        # Normalize to Zulu time for Graph
+        start_time_iso = (
+            START_TIME.astimezone(timezone.utc)
+            .replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+
         for folder_name in ["inbox", "junk"]:
             print(f"\n🔄 Processing {folder_name.upper()} folder...")
-            
+
             folder_id = folder_ids[folder_name]
             existing_delta_url = delta_tokens.get(folder_name)
-            
+
             # Perform delta sync
             if existing_delta_url:
-                changes, new_delta_url = graph_delta_sync(folder_name, folder_id, delta_url=existing_delta_url)
+                changes, new_delta_url = graph_delta_sync(
+                    folder_name, folder_id, delta_url=existing_delta_url
+                )
             else:
-                changes, new_delta_url = graph_delta_sync(folder_name, folder_id, since_utc_iso=start_time_iso)
-            
-            # Process each change
+                changes, new_delta_url = graph_delta_sync(
+                    folder_name, folder_id, since_utc_iso=start_time_iso
+                )
+
+            # Process each change before finalizing the token
             for change in changes:
-                if change["removed"]:
-                    print(f"🗑️ Message removed: {change['id']}")
+                if change.get("removed"):
+                    print(f"🗑️ Message removed: {change.get('id')}")
                 else:
-                    process_graph_message(change["message"], folder_name)
-            
-            # Save new delta token
+                    process_graph_message(change.get("message"), folder_name)
+
+            # Finalize token *once* per folder
             if new_delta_url:
                 delta_tokens[folder_name] = new_delta_url
                 print(f"💾 Updated delta token for {folder_name}")
             else:
-                print(f"⚠️ No new delta token received for {folder_name}")
-        
-        # Save all delta tokens
+                # Token expired (410) or not returned; clear so next pass reseeds from last day
+                if existing_delta_url:
+                    delta_tokens.pop(folder_name, None)
+                    print(f"🧹 Cleared stale delta token for {folder_name}")
+
+        # Persist all tokens atomically after both folders
         save_delta_tokens(delta_tokens)
-        
+
     except Exception as e:
-        print(f"❌ Error in Graph API folder processing: {e}")
+        print(f"❌ Error in process_folders_with_graph_api: {e}")
         import traceback
         print(f"❌ Traceback: {traceback.format_exc()}")
 
@@ -1692,103 +1713,30 @@ def reconnect_account():
 consecutive_errors = 0
 last_successful_check = time.time()
 
+POLL_INTERVAL_SECS = 10
+BACKSTOP_REAUTH_SECS = 3600  # 1h
+
 while True:
     try:
-        print(f"🔄 Checking for new emails... (Pending: {len(pending_emails)}, Processed: {len(processed_messages)})")
-        
-        # Check if it's been too long since last successful check (1 hour)
-        if time.time() - last_successful_check > 3600:
-            print("⚠️ No successful checks in 1 hour, forcing re-authentication...")
+        # Force reauth if we haven’t had a clean cycle in a while
+        if time.time() - last_successful_check > BACKSTOP_REAUTH_SECS:
+            print("⚠️ No successful checks in 1 hour, forcing re-auth...")
             reconnect_account()
-        
-        # Revert to original approach but with better time window  
-        print(f"🔄 Using improved O365 library approach...")
-        
-        # Process with a more recent time window to catch latest emails
-        current_time = datetime.now(timezone.utc)
-        recent_window = current_time - timedelta(hours=2)  # Last 2 hours
-        
-        print(f"📅 Processing emails from: {recent_window.isoformat()}")
-        
-        # Use original process_folder but with recent time window
-        inbox_query = inbox_folder.new_query().on_attribute('receivedDateTime').greater_equal(recent_window)
-        junk_query = junk_folder.new_query().on_attribute('receivedDateTime').greater_equal(recent_window)
-        
-        print(f"📡 Querying INBOX for recent emails...")
-        inbox_msgs = list(inbox_folder.get_messages(query=inbox_query))
-        print(f"📬 Found {len(inbox_msgs)} recent emails in INBOX")
-        
-        print(f"📡 Querying JUNK for recent emails...")
-        junk_msgs = list(junk_folder.get_messages(query=junk_query))  
-        print(f"📬 Found {len(junk_msgs)} recent emails in JUNK")
-        
-        # Process each message
-        all_msgs = [(msg, "INBOX") for msg in inbox_msgs] + [(msg, "JUNK") for msg in junk_msgs]
-        
-        for msg, folder_name in all_msgs:
-            try:
-                print(f"\n🔍 Found email: {msg.subject} from {msg.sender.address if msg.sender else 'Unknown'}")
-                
-                # Skip if already read
-                if msg.is_read:
-                    print(f"⏭️ Skipping read email")
-                    continue
-                
-                # Skip if already processed
-                dedup_key = getattr(msg, 'internet_message_id', None) or msg.object_id
-                if dedup_key in processed_messages:
-                    print(f"⏭️ Skipping already processed email")
-                    continue
-                
-                # Skip if already tagged as processed
-                if any((c or '').startswith('PAIRActioned') for c in (msg.categories or [])):
-                    print(f"⏭️ Skipping already tagged email")
-                    continue
-                
-                # Process the email
-                body_to_analyze = msg.body or ""
-                print(f"🎯 Processing: {msg.subject}")
-                
-                result = classify_email(msg.subject, body_to_analyze)
-                print(json.dumps(result, indent=2))
-                
-                if HUMAN_CHECK:
-                    email_id = msg.object_id
-                    if email_id not in pending_emails:
-                        pending_emails[email_id] = {
-                            "subject": msg.subject,
-                            "body": body_to_analyze,
-                            "classification": result,
-                            "sender": msg.sender.address if msg.sender else "Unknown",
-                            "received": msg.received.strftime('%Y-%m-%d %H:%M') if msg.received else "Unknown",
-                            "message_obj": msg
-                        }
-                        print(f"📧 Email stored for approval: {msg.subject}")
-                    processed_messages.add(dedup_key)
-                else:
-                    handle_new_email(msg, result)
-                    processed_messages.add(dedup_key)
-                    
-            except Exception as e:
-                print(f"❌ Error processing email: {e}")
-                
-        print(f"✅ Processed {len(all_msgs)} recent emails")
-        
-        # Reset error counter on success
+
+        # 🔑 Drive delta for both folders (this updates delta_tokens.json on each pass)
+        process_folders_with_graph_api()
+
         consecutive_errors = 0
         last_successful_check = time.time()
-        
     except Exception as e:
         consecutive_errors += 1
         print(f"❌ Error in main loop (attempt {consecutive_errors}): {e}")
-        
-        # If we get 3 errors in a row, try to re-authenticate
         if consecutive_errors >= 3:
-            print("⚠️ Multiple consecutive errors detected, attempting to reconnect...")
+            print("⚠️ Multiple consecutive errors; attempting to reconnect…")
             if reconnect_account():
                 consecutive_errors = 0
             else:
-                print("😴 Waiting 60 seconds before retry...")
+                print("😴 Sleeping 60s before retry…")
                 time.sleep(60)
-    
-    time.sleep(10)
+    time.sleep(POLL_INTERVAL_SECS)
+
