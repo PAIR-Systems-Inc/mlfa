@@ -1,0 +1,192 @@
+def process_folder(folder, name, delta_token_url):
+    """
+    Uses the Microsoft Graph /delta endpoint directly so we can:
+      1) Page through all changes (via @odata.nextLink)
+      2) Capture and return the final @odata.deltaLink
+
+    `delta_token_url` should be either:
+      - None (first run), or
+      - The FULL @odata.deltaLink URL from a previous run (store it as-is).
+    """
+    import urllib.parse
+
+    # --- Build the initial delta URL ---
+    # Prefer the account's protocol base if available; fall back to the standard Graph URL.
+    try:
+        base_url = getattr(account.protocol, "service_url", None)
+        if callable(base_url):
+            base_url = account.protocol.service_url()
+        if not base_url:
+            base_url = "https://graph.microsoft.com/v1.0"
+    except Exception:
+        base_url = "https://graph.microsoft.com/v1.0"
+
+    if delta_token_url:
+        next_url = delta_token_url  # resume from last delta link (FULL URL)
+        params = None
+    else:
+        # First sync: build a delta URL scoped to THIS folder
+        # /users/{user}/mailFolders/{folder_id}/messages/delta
+        folder_id = folder.object_id
+        user_part = urllib.parse.quote(EMAIL_TO_WATCH)
+        next_url = f"{base_url}/users/{user_part}/mailFolders/{folder_id}/messages/delta"
+        # Select lean fields (Graph uses camelCase field names)
+        params = {
+            "$select": "id,conversationId,isRead,receivedDateTime,from,sender,subject,categories,uniqueBody,body",
+            "$top": "50",
+        }
+        # Your START_TIME filter on first run
+        if START_TIME:
+            params["$filter"] = f"receivedDateTime ge {START_TIME.isoformat()}"
+
+    final_delta_link = delta_token_url  # will be replaced when Graph returns a new one
+    total_changed = 0
+
+    try:
+        # Use the O365 connection so auth headers/tokens are handled for us
+        conn = account.connection
+
+        # Accumulate changes page by page
+        while next_url:
+            resp = conn.get(next_url, params=params) if params else conn.get(next_url)
+            if not resp or resp.status_code // 100 != 2:
+                print(f" Error accessing {name}: {getattr(resp, 'status_code', 'n/a')} {getattr(resp, 'text', '')}")
+                return delta_token_url or final_delta_link
+
+            data = resp.json() or {}
+            items = data.get("value", [])
+
+            # --- DIAGNOSTIC ---
+            print(f"DIAGNOSTIC [{name}]: Page returned {len(items)} item(s).")
+
+            # Process each changed item exactly as before
+            for item in items:
+                total_changed += 1
+                # We intentionally re-fetch the message object via SDK for your existing logic
+                try:
+                    msg = folder.get_message(object_id=item.get("id"))
+                except Exception:
+                    msg = None
+
+                if not msg:
+                    continue
+
+                # ==== BEGIN: your existing per-item logic (unchanged) ====
+                conv_id = getattr(msg, "conversation_id", None)
+                if not conv_id:
+                    dedup_key = getattr(msg, "internet_message_id", None) or msg.object_id
+                    if dedup_key in processed_messages:
+                        continue
+                    try:
+                        msg.refresh()
+                    except Exception:
+                        pass
+                    if any((c or "").startswith("PAIRActioned") for c in (msg.categories or [])):
+                        processed_messages.add(dedup_key)
+                        continue
+                    if not msg.is_read:
+                        sender_addr = (msg.sender.address or "").lower() if msg.sender else ""
+                        sender_is_staff = sender_addr in [e.lower() for e in EMAILS_TO_FORWARD]
+                        is_automated_reply = bool(re.search(fr"{REPLY_ID_TAG}\s*([^\s<]+)", msg.body or "", flags=re.I|re.S))
+                        if sender_is_staff and is_automated_reply and not any((c or "").startswith("PAIRActioned") for c in (msg.categories or [])):
+                            handle_internal_reply(msg)
+                            processed_messages.add(dedup_key)
+                            continue
+
+                        body_to_analyze = get_clean_message_text(msg)
+                        print(f"\nNEW:  [{name}] {msg.received.strftime('%Y-%m-%d %H:%M')} | "
+                              f"{msg.sender.address if msg.sender else 'UNKNOWN'} | {msg.subject}")
+                        result = classify_email(msg.subject, body_to_analyze)
+                        if HUMAN_CHECK:
+                            print(json.dumps(result, indent=2))
+                            email_id = msg.object_id
+                            if email_id not in pending_emails:
+                                pending_emails[email_id] = {
+                                    "subject": msg.subject,
+                                    "body": body_to_analyze,
+                                    "classification": result,
+                                    "sender": msg.sender.address if msg.sender else "",
+                                    "received": msg.received.strftime('%Y-%m-%d %H:%M'),
+                                    "message_obj": msg,
+                                }
+                                print(f"📧 Email stored for approval: {msg.subject}")
+                            else:
+                                print(f"⏭️  Email already in pending queue, skipping: {msg.subject}")
+                            processed_messages.add(dedup_key)
+                        else:
+                            print(json.dumps(result, indent=2))
+                            handle_new_email(msg, result)
+                            processed_messages.add(dedup_key)
+                    continue  # done with this delta item
+
+                # Normal path: fetch unread messages in this conversation
+                try:
+                    unread_msgs = unread_in_conversation(folder, mailbox, conv_id)
+                except Exception as e:
+                    print(f"   Could not fetch unread children for {conv_id}: {e}")
+                    continue
+
+                if not unread_msgs:
+                    continue
+
+                for child in unread_msgs:
+                    dedup_key = getattr(child, "internet_message_id", None) or child.object_id
+                    if dedup_key in processed_messages:
+                        continue
+                    try:
+                        child.refresh()
+                    except Exception:
+                        pass
+                    if any((c or "").startswith("PAIRActioned") for c in (child.categories or [])):
+                        processed_messages.add(dedup_key)
+                        continue
+
+                    sender_addr = (child.sender.address or "").lower() if child.sender else ""
+                    sender_is_staff = sender_addr in [e.lower() for e in EMAILS_TO_FORWARD]
+                    is_automated_reply = bool(re.search(fr"{REPLY_ID_TAG}\s*([^\s<]+)", child.body or "", flags=re.I|re.S))
+                    if sender_is_staff and is_automated_reply and not any((c or "").startswith("PAIRActioned") for c in (child.categories or [])):
+                        handle_internal_reply(child)
+                        processed_messages.add(dedup_key)
+                        continue
+
+                    body_to_analyze = get_clean_message_text(child)
+                    print(f"\nNEW:  [{name}] {child.received.strftime('%Y-%m-%d %H:%M')} | "
+                          f"{child.sender.address if child.sender else 'UNKNOWN'} | {child.subject}")
+                    result = classify_email(child.subject, body_to_analyze)
+                    print(json.dumps(result, indent=2))
+
+                    if HUMAN_CHECK:
+                        email_id = child.object_id
+                        if email_id not in pending_emails:
+                            pending_emails[email_id] = {
+                                "subject": child.subject,
+                                "body": body_to_analyze,
+                                "classification": result,
+                                "sender": child.sender.address if child.sender else "",
+                                "received": child.received.strftime('%Y-%m-%d %H:%M'),
+                                "message_obj": child,
+                            }
+                            print(f"📧 Email stored for approval: {child.subject}")
+                        else:
+                            print(f"⏭️  Email already in pending queue, skipping: {child.subject}")
+                    else:
+                        handle_new_email(child, result)
+
+                    processed_messages.add(dedup_key)
+                # ==== END: your existing per-item logic ====
+
+            # Prepare next page or finish
+            params = None  # after first request, Graph returns absolute nextLink/deltaLink
+            next_url = data.get("@odata.nextLink")
+            if data.get("@odata.deltaLink"):
+                final_delta_link = data["@odata.deltaLink"]
+
+        # --- DIAGNOSTIC SUMMARY ---
+        print(f"DIAGNOSTIC [{name}]: Processed {total_changed} changed item(s). Final delta: {bool(final_delta_link)}")
+
+        # Return the FULL delta URL to persist (use as-is next time)
+        return final_delta_link or delta_token_url
+
+    except Exception as e:
+        print(f" Error accessing {name}: {e}")
+        return delta_token_url or final_delta_link
