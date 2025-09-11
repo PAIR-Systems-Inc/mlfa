@@ -1,0 +1,96 @@
+Based on the code you provided, you are absolutely correct. The script isn't failing or crashing; it's entering a state where its connection to Microsoft's servers becomes invalid, causing it to stop "picking up" new mail.
+The problem is a classic stale token issue, and your code structure confirms it. The reconnect_account function you added shows you've already identified the symptom—this is the right path to a solution.
+
+The Core Problem in Your Code
+One-Time Authentication: The line account = Account(...) is run only once when the script starts. This gets a valid access token that is stored within the account object.
+Token Expiration: This access token is designed to expire after about 60-90 minutes.
+Stale Connection: Inside your while True: loop, the process_folder function keeps using the original account object. After an hour, this object is still trying to use the expired token.
+Silent Failure: When process_folder tries to make an API call (conn.get(...)) with the expired token, Microsoft's server rejects it (likely with a 401 Unauthorized error). Your try...except Exception as e: block correctly catches this error, prints a message, and the loop continues.
+The result is a script that looks like it's running perfectly, but every API call is failing behind the scenes until your error counter hits 3 or the one-hour timer forces a reconnection.
+
+A More Proactive and Stable Solution
+Your reconnect_account function is the correct fix, but we can integrate it more smoothly to prevent the errors from happening in the first place, rather than reacting to them. The best practice is to proactively refresh the connection before the token has a chance to expire.
+Here is a refined version of your main loop that does this.
+Recommended Code Structure
+Replace your existing while True: loop at the end of the script with this more robust version. It checks the connection's age before trying to fetch emails.
+Python
+# ... (all your functions and initial setup before the loop) ...
+
+
+# --- NEW: Add a variable to track the last successful authentication time ---
+last_auth_time = time.time()
+
+
+# Re-authenticate and reconnect to mailbox
+def reconnect_account():
+    """Re-authenticate and reconnect to mailbox"""
+    global account, mailbox, inbox_folder, junk_folder, last_auth_time
+    
+    print("🔄 Re-authenticating with Microsoft Graph API...")
+    try:
+        if IS_PRODUCTION and CLIENT_SECRET:
+            credentials = (CLIENT_ID, CLIENT_SECRET)
+            account = Account(credentials, auth_flow_type="credentials", tenant_id=TENANT_ID)
+            # The authenticate() call is implicitly handled by the library on first API call,
+            # but we can force it if needed. Creating a new object is often sufficient.
+        else:
+            credentials = (CLIENT_ID, None)
+            token_backend = FileSystemTokenBackend(token_path=".", token_filename="o365_token.txt")
+            account = Account(credentials, auth_flow_type="authorization", token_backend=token_backend, tenant_id=TENANT_ID)
+            
+        if account.authenticate(scopes=['basic', 'message_all']):
+            mailbox = account.mailbox(resource=EMAIL_TO_WATCH)
+            inbox_folder = mailbox.inbox_folder()
+            junk_folder = mailbox.junk_folder()
+            
+            print("✅ Successfully re-authenticated!")
+            last_auth_time = time.time() # Reset the timer on success
+            return True
+        else:
+            print("❌ Re-authentication failed.")
+            return False
+            
+    except Exception as e:
+        print(f"❌ Re-authentication failed with an exception: {e}")
+        return False
+
+
+# --- REFINED MAIN LOOP ---
+while True:
+    try:
+        # Proactive check: Re-authenticate if connection is older than 45 minutes
+        # This prevents the token from expiring during the process_folder call.
+        if time.time() - last_auth_time > 2700: # 2700 seconds = 45 minutes
+            print("Connection is over 45 minutes old. Proactively reconnecting...")
+            if not reconnect_account():
+                print("😴 Reconnection failed. Waiting 60 seconds before retry...")
+                time.sleep(60)
+                continue # Skip to the next loop iteration
+
+
+        print(f"🔄 Checking for new emails... (Pending: {len(pending_emails)})")
+        
+        inbox_delta = process_folder(inbox_folder, "INBOX", inbox_delta)
+        junk_delta = process_folder(junk_folder, "JUNK", junk_delta)
+        
+        save_last_delta(inbox_delta, junk_delta)
+        
+    except Exception as e:
+        # This block now primarily catches unexpected errors, not routine auth failures.
+        print(f"❌ An unexpected error occurred in the main loop: {e}")
+        print("Attempting to reconnect...")
+        if not reconnect_account():
+            print("😴 Reconnection failed. Waiting 60 seconds before retry...")
+            time.sleep(60)
+    
+    time.sleep(10)
+
+
+Why This Is Better
+Proactive vs. Reactive: This new loop doesn't wait for errors to happen. It ensures the connection is fresh before making the API calls, leading to fewer failed attempts.
+Stability: It eliminates the routine authentication errors, so the try...except block will only catch truly unexpected problems, making your logs cleaner and debugging easier.
+Efficiency: It prevents the script from running for an hour with a dead connection, only to be saved by an error counter.
+By implementing this proactive refresh, your script will reliably maintain its connection and consistently "pick up" new emails as they arrive.
+
+
+
